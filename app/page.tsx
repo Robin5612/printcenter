@@ -873,8 +873,6 @@ export function PrintcenterApp({
   ]);
   const [articles, setArticles] = useState(initialArticles);
   const [documents, setDocuments] = useState(initialDocuments);
-  const [selectedCustomerId, setSelectedCustomerId] = useState(1);
-  const [selectedSupplierId, setSelectedSupplierId] = useState(1);
   const [customerForm, setCustomerForm] = useState<"new" | number | null>(null);
   const [supplierForm, setSupplierForm] = useState<"new" | number | null>(null);
   const [articleForm, setArticleForm] = useState<"new" | number | null>(null);
@@ -903,12 +901,6 @@ export function PrintcenterApp({
   const [databaseReady, setDatabaseReady] = useState(false);
   const [backendClock, setBackendClock] = useState("");
   const [backendNow, setBackendNow] = useState(0);
-  const selectedCustomer =
-    customers.find((customer) => customer.id === selectedCustomerId) ??
-    customers[0];
-  const selectedSupplier =
-    suppliers.find((supplier) => supplier.id === selectedSupplierId) ??
-    suppliers[0];
   useEffect(() => {
     const updateClock = () => {
       const now = new Date();
@@ -1002,8 +994,6 @@ export function PrintcenterApp({
         setDocuments(state.documents);
         setBackendUsers(state.backendUsers);
         setWorkflowSettings(state.workflowSettings);
-        setSelectedCustomerId(state.customers[0]?.id ?? 0);
-        setSelectedSupplierId(state.suppliers[0]?.id ?? 0);
         setDatabaseReady(true);
       })
       .catch(() => {
@@ -1155,7 +1145,6 @@ export function PrintcenterApp({
           body: JSON.stringify(draft),
         });
         setCustomers((current) => [...current, next]);
-        setSelectedCustomerId(next.id);
         setNotice(`${name} wurde dauerhaft als Kunde angelegt.`);
       }
       setCustomerForm(null);
@@ -1181,7 +1170,6 @@ export function PrintcenterApp({
             : article,
         ),
       );
-      setSelectedCustomerId(remaining[0]?.id ?? 0);
       setCustomerForm(null);
       setNotice(
         `${customer.name} wurde dauerhaft gelöscht. Zugeordnete Artikel bleiben ohne Kundenverbindung erhalten.`,
@@ -1392,7 +1380,6 @@ export function PrintcenterApp({
           body: JSON.stringify(draft),
         });
         setSuppliers((current) => [...current, next]);
-        setSelectedSupplierId(next.id);
         setNotice(`${name} wurde dauerhaft als Lieferant angelegt.`);
       }
       setSupplierForm(null);
@@ -1418,7 +1405,6 @@ export function PrintcenterApp({
             : article,
         ),
       );
-      setSelectedSupplierId(remaining[0]?.id ?? 0);
       setSupplierForm(null);
       setNotice(
         `${supplier.name} wurde dauerhaft gelöscht. Betroffene Artikel sind jetzt nicht zugeordnet.`,
@@ -2950,10 +2936,8 @@ export function PrintcenterApp({
           {view === "Kunden" && (
             <CustomersView
               customers={customers}
-              selected={selectedCustomer}
               formMode={customerForm}
               setFormMode={setCustomerForm}
-              onSelect={setSelectedCustomerId}
               onSave={saveCustomer}
               onDelete={deleteCustomer}
               onAddEmployee={addEmployee}
@@ -2967,7 +2951,6 @@ export function PrintcenterApp({
           {view === "Lieferanten" && (
             <SuppliersView
               suppliers={suppliers}
-              selected={selectedSupplier}
               groups={groups}
               groupName={groupName}
               setGroupName={setGroupName}
@@ -2975,7 +2958,6 @@ export function PrintcenterApp({
               onDeleteGroup={deleteGroup}
               formMode={supplierForm}
               setFormMode={setSupplierForm}
-              onSelect={setSelectedSupplierId}
               onSave={saveSupplier}
               onDelete={deleteSupplier}
             />
@@ -3027,8 +3009,6 @@ export function PrintcenterApp({
                   ...initialWorkflowSettings,
                   ...(state.workflowSettings ?? {}),
                 });
-                setSelectedCustomerId(state.customers[0]?.id ?? 0);
-                setSelectedSupplierId(state.suppliers[0]?.id ?? 0);
               }}
               onWorkflowSave={(event) => {
                 event.preventDefault();
@@ -3221,10 +3201,8 @@ function Overview({
 
 function CustomersView({
   customers,
-  selected,
   formMode,
   setFormMode,
-  onSelect,
   onSave,
   onDelete,
   onAddEmployee,
@@ -3235,10 +3213,8 @@ function CustomersView({
   documents,
 }: {
   customers: Customer[];
-  selected?: Customer;
   formMode: "new" | number | null;
   setFormMode: (mode: "new" | number | null) => void;
-  onSelect: (id: number) => void;
   onSave: (event: FormEvent<HTMLFormElement>) => void | Promise<void>;
   onDelete: (customer: Customer) => void | Promise<void>;
   onAddEmployee: (
@@ -3275,7 +3251,7 @@ function CustomersView({
       ? customers.find((customer) => customer.id === formMode)
       : undefined;
   const [expandedCustomerId, setExpandedCustomerId] = useState<number | null>(
-    selected?.id ?? null,
+    null,
   );
   const [editingEmployeeId, setEditingEmployeeId] = useState<number | null>(
     null,
@@ -3284,7 +3260,6 @@ function CustomersView({
     const open = expandedCustomerId === customer.id;
     setExpandedCustomerId(open ? null : customer.id);
     setEditingEmployeeId(null);
-    if (!open) onSelect(customer.id);
   }
   return (
     <section className="customer-addressbook panel">
@@ -3839,7 +3814,6 @@ function CustomerForm({
 
 function SuppliersView({
   suppliers,
-  selected,
   groups,
   groupName,
   setGroupName,
@@ -3847,12 +3821,10 @@ function SuppliersView({
   onDeleteGroup,
   formMode,
   setFormMode,
-  onSelect,
   onSave,
   onDelete,
 }: {
   suppliers: Supplier[];
-  selected?: Supplier;
   groups: string[];
   groupName: string;
   setGroupName: (value: string) => void;
@@ -3860,7 +3832,6 @@ function SuppliersView({
   onDeleteGroup: (name: string) => void | Promise<void>;
   formMode: "new" | number | null;
   setFormMode: (mode: "new" | number | null) => void;
-  onSelect: (id: number) => void;
   onSave: (event: FormEvent<HTMLFormElement>) => void | Promise<void>;
   onDelete: (supplier: Supplier) => void | Promise<void>;
 }) {
@@ -3869,12 +3840,11 @@ function SuppliersView({
       ? suppliers.find((supplier) => supplier.id === formMode)
       : undefined;
   const [expandedSupplierId, setExpandedSupplierId] = useState<number | null>(
-    selected?.id ?? null,
+    null,
   );
   function toggleSupplier(supplier: Supplier) {
     const open = expandedSupplierId === supplier.id;
     setExpandedSupplierId(open ? null : supplier.id);
-    if (!open) onSelect(supplier.id);
   }
   return (
     <section className="supplier-workspace">
