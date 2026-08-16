@@ -794,13 +794,13 @@ async function ensureFullSchema(db: D1Database) {
     db,
     "workflow_settings",
     "backend_password_reset_subject",
-    "TEXT NOT NULL DEFAULT 'Passwort für Printcenter zurücksetzen'",
+    "TEXT",
   );
   await ensureColumn(
     db,
     "workflow_settings",
     "backend_password_reset_template",
-    "TEXT NOT NULL DEFAULT 'Guten Tag {name},\\n\\nüber den folgenden Link können Sie Ihr Passwort für das Printcenter-Backend neu setzen:\\n\\n{resetUrl}\\n\\nDer Link ist {expiresIn} gültig und kann nur einmal verwendet werden. Falls Sie diese Änderung nicht angefordert haben, können Sie diese E-Mail ignorieren.\\n\\nFreundliche Grüsse\\nPrintcenter'",
+    "TEXT",
   );
   await db.prepare("PRAGMA optimize").run();
 }
