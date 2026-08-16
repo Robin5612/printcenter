@@ -1,6 +1,13 @@
 "use client";
 
-import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import {
+  ChangeEvent,
+  FormEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import Link from "next/link";
 import { createDocumentPdfDataUri, downloadDocumentPdf } from "./document-pdf";
 import { completeSupplierTier } from "./price-calculation";
@@ -871,11 +878,13 @@ export function PrintcenterApp({
   initialPortalNumber,
   initialSupplierToken,
   initialBackendResetToken,
+  initialPortalPreviewToken,
 }: {
   initialRoute: EntryRoute;
   initialPortalNumber?: string;
   initialSupplierToken?: string;
   initialBackendResetToken?: string;
+  initialPortalPreviewToken?: string;
 }) {
   const [view, setView] = useState<View>("Übersicht");
   const [customers, setCustomers] = useState(initialCustomers);
@@ -902,6 +911,10 @@ export function PrintcenterApp({
   const [portalRoute, setPortalRoute] = useState<string | null>(
     initialRoute === "customer" ? (initialPortalNumber ?? null) : null,
   );
+  const [portalPreviewStatus, setPortalPreviewStatus] = useState<
+    "idle" | "pending" | "authorized" | "failed"
+  >(initialPortalPreviewToken ? "pending" : "idle");
+  const portalPreviewStarted = useRef(false);
   const [supplierRoute, setSupplierRoute] = useState<string | null>(
     initialRoute === "supplier" ? (initialSupplierToken ?? null) : null,
   );
@@ -2616,57 +2629,41 @@ export function PrintcenterApp({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customers, articles, documents]);
   useEffect(() => {
-    const previewToken = new URLSearchParams(
+    const hashToken = new URLSearchParams(
       window.location.hash.replace(/^#/, ""),
     ).get("portal-preview");
-    if (previewToken) {
-      const storageKey = `printcenter:portal-preview:${previewToken}`;
-      const storedPreview = window.localStorage.getItem(storageKey);
-      window.localStorage.removeItem(storageKey);
+    const previewToken = initialPortalPreviewToken || hashToken;
+    if (!previewToken || portalPreviewStarted.current) return;
+    portalPreviewStarted.current = true;
+    setPortalPreviewStatus("pending");
+    if (hashToken)
       window.history.replaceState({}, "", window.location.pathname);
-      const activatePreview = (preview: {
-        customerId: number;
-        employeeId: number;
-        expiresAt: number;
-      }) => {
-        if (preview.expiresAt > Date.now())
-          setPortalSession({
-            customerId: preview.customerId,
-            employeeId: preview.employeeId,
-            source: "backend-preview",
-          });
-      };
-      if (storedPreview) {
-        try {
-          const preview = JSON.parse(storedPreview) as {
-            customerId: number;
-            employeeId: number;
-            expiresAt: number;
-          };
-          activatePreview(preview);
-          void apiRequest(
-            `/api/portal-previews/${encodeURIComponent(previewToken)}`,
-            { method: "POST" },
-          ).catch(() => {
-            // Die lokale Freigabe ist bereits aktiv; die Serverbereinigung ist optional.
-          });
-        } catch {
-          // Ungültige oder abgelaufene Vorschau-Tokens werden still verworfen.
-        }
-      } else
-        void apiRequest<{
-          customerId: number;
-          employeeId: number;
-          expiresAt: number;
-        }>(`/api/portal-previews/${encodeURIComponent(previewToken)}`, {
-          method: "POST",
-        })
-          .then(activatePreview)
-          .catch(() => {
-            // Ungültige oder bereits verwendete Vorschau-Links öffnen den Login.
-          });
-    }
-  }, []);
+    void apiRequest<{
+      customerId: number;
+      employeeId: number;
+      expiresAt: number;
+    }>(`/api/portal-previews/${encodeURIComponent(previewToken)}`, {
+      method: "POST",
+    })
+      .then((preview) => {
+        if (preview.expiresAt <= Date.now())
+          throw new Error("Die Backend-Freigabe ist abgelaufen.");
+        setPortalSession({
+          customerId: preview.customerId,
+          employeeId: preview.employeeId,
+          source: "backend-preview",
+        });
+        const cleanUrl = new URL(window.location.href);
+        cleanUrl.searchParams.delete("portal-preview");
+        window.history.replaceState(
+          {},
+          "",
+          `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`,
+        );
+        setPortalPreviewStatus("authorized");
+      })
+      .catch(() => setPortalPreviewStatus("failed"));
+  }, [initialPortalPreviewToken]);
   useEffect(() => {
     if (portalSession) {
       const customer = customers.find(
@@ -2746,20 +2743,8 @@ export function PrintcenterApp({
           body: JSON.stringify({ customerId, employeeId: employee.id }),
         },
       );
-      try {
-        window.localStorage.setItem(
-          `printcenter:portal-preview:${preview.token}`,
-          JSON.stringify({
-            customerId,
-            employeeId: employee.id,
-            expiresAt: preview.expiresAt,
-          }),
-        );
-      } catch {
-        // Ohne Browserspeicher wird die einmalige Freigabe vom Server eingelöst.
-      }
       const previewUrl = new URL(`/${customer.number}`, window.location.origin);
-      previewUrl.hash = `portal-preview=${encodeURIComponent(preview.token)}`;
+      previewUrl.searchParams.set("portal-preview", preview.token);
       if (previewWindow) previewWindow.location.replace(previewUrl.href);
       else window.location.assign(previewUrl.href);
     } catch (error) {
@@ -2889,6 +2874,11 @@ export function PrintcenterApp({
         (item) => item.number.toLowerCase() === portalRoute.toLowerCase(),
       )
     : undefined;
+  if (
+    portalPreviewStatus === "pending" ||
+    (portalPreviewStatus === "authorized" && !databaseReady)
+  )
+    return <PortalPreviewLoading />;
   if (portalCustomer && !portalSession)
     return (
       <PortalLogin
@@ -7128,6 +7118,34 @@ function PortalDocuments({
         )}
       </div>
     </section>
+  );
+}
+
+function PortalPreviewLoading() {
+  return (
+    <main className="portal-login">
+      <section className="login-panel portal-login-panel preview-loading-panel">
+        <div className="brand brand--login">
+          <Monogram />
+          <span>
+            print
+            <br />
+            center
+          </span>
+        </div>
+        <p className="eyebrow">KUNDENPORTAL</p>
+        <h1>Portal wird geöffnet.</h1>
+        <p className="login-copy">
+          Die Backend-Freigabe und die Kundendaten werden sicher übernommen.
+        </p>
+        <span className="preview-loading-bar" aria-label="Portal wird geladen" />
+      </section>
+      <div className="login-art" aria-hidden="true">
+        <span />
+        <i />
+        <b />
+      </div>
+    </main>
   );
 }
 

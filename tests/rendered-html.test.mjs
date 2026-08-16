@@ -75,6 +75,17 @@ test("keeps the public customer route available", async () => {
   assert.doesNotMatch(html, /Your site is taking shape/i);
 });
 
+test("keeps backend portal previews in a dedicated authorization state", async () => {
+  const response = await render(
+    "/K-10024?portal-preview=11111111-1111-4111-8111-111111111111",
+  );
+  assert.equal(response.status, 200);
+
+  const html = await response.text();
+  assert.match(html, /Portal wird geöffnet\./);
+  assert.doesNotMatch(html, /Backend anmelden\.|Kundenlogin\./);
+});
+
 test("never falls back to the backend login for an unknown customer number", async () => {
   const response = await render("/UNBEKANNT");
   assert.equal(response.status, 200);
