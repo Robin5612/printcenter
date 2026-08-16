@@ -3197,6 +3197,9 @@ async function handleDirectoryApi(
   const emailSenderMatch = url.pathname.match(
     /^\/api\/email-senders\/(\d+)(?:\/(test))?$/,
   );
+  const portalPreviewMatch = url.pathname.match(
+    /^\/api\/portal-previews\/([0-9a-f-]{36})$/i,
+  );
   if (url.pathname === "/api/database/health" && request.method === "GET")
     return json(await databaseHealth(db));
   if (url.pathname === "/api/integrations" && request.method === "GET")
@@ -3219,6 +3222,70 @@ async function handleDirectoryApi(
     request.method === "GET" || request.method === "DELETE"
       ? {}
       : await request.json<Record<string, unknown>>();
+
+  if (url.pathname === "/api/portal-previews" && request.method === "POST") {
+    const origin = request.headers.get("Origin");
+    if (origin && origin !== url.origin)
+      return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
+    const customerId = Number(body.customerId);
+    const employeeId = Number(body.employeeId);
+    if (
+      !Number.isInteger(customerId) ||
+      customerId <= 0 ||
+      !Number.isInteger(employeeId) ||
+      employeeId <= 0
+    )
+      return json(
+        { error: "Der gewählte Mitarbeiterzugang ist ungültig." },
+        { status: 400 },
+      );
+    const employee = await db
+      .prepare(
+        "SELECT e.id FROM customer_employees e JOIN customers c ON c.id = e.customer_id WHERE e.id = ? AND e.customer_id = ? AND e.active = 1 LIMIT 1",
+      )
+      .bind(employeeId, customerId)
+      .first<{ id: number }>();
+    if (!employee)
+      return json(
+        { error: "Der Mitarbeiterzugang wurde nicht gefunden." },
+        { status: 404 },
+      );
+    const token = crypto.randomUUID();
+    const expiresAt = Date.now() + 2 * 60_000;
+    await db
+      .prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)")
+      .bind(
+        `portal_preview:${token}`,
+        JSON.stringify({ customerId, employeeId, expiresAt }),
+      )
+      .run();
+    return json({ token, expiresAt }, { status: 201 });
+  }
+  if (portalPreviewMatch && request.method === "DELETE") {
+    const token = portalPreviewMatch[1].toLowerCase();
+    const key = `portal_preview:${token}`;
+    const stored = await db
+      .prepare("SELECT value FROM app_meta WHERE key = ? LIMIT 1")
+      .bind(key)
+      .first<{ value: string }>();
+    await db.prepare("DELETE FROM app_meta WHERE key = ?").bind(key).run();
+    if (!stored?.value)
+      return json(
+        { error: "Dieser Vorschau-Link ist ungültig oder wurde bereits verwendet." },
+        { status: 404 },
+      );
+    const preview = parseJson<{
+      customerId: number;
+      employeeId: number;
+      expiresAt: number;
+    }>(stored.value, { customerId: 0, employeeId: 0, expiresAt: 0 });
+    if (preview.expiresAt <= Date.now())
+      return json(
+        { error: "Dieser Vorschau-Link ist abgelaufen." },
+        { status: 410 },
+      );
+    return json(preview);
+  }
 
   if (url.pathname === "/api/request-emails" && request.method === "POST")
     return sendRequestEmails(body, request, url, env, db);

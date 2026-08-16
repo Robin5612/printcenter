@@ -2575,7 +2575,6 @@ export function PrintcenterApp({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customers, articles, documents]);
-  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     const previewToken = new URLSearchParams(
       window.location.hash.replace(/^#/, ""),
@@ -2585,6 +2584,18 @@ export function PrintcenterApp({
       const storedPreview = window.localStorage.getItem(storageKey);
       window.localStorage.removeItem(storageKey);
       window.history.replaceState({}, "", window.location.pathname);
+      const activatePreview = (preview: {
+        customerId: number;
+        employeeId: number;
+        expiresAt: number;
+      }) => {
+        if (preview.expiresAt > Date.now())
+          setPortalSession({
+            customerId: preview.customerId,
+            employeeId: preview.employeeId,
+            source: "backend-preview",
+          });
+      };
       if (storedPreview) {
         try {
           const preview = JSON.parse(storedPreview) as {
@@ -2592,19 +2603,24 @@ export function PrintcenterApp({
             employeeId: number;
             expiresAt: number;
           };
-          if (preview.expiresAt > Date.now())
-            setPortalSession({
-              customerId: preview.customerId,
-              employeeId: preview.employeeId,
-              source: "backend-preview",
-            });
+          activatePreview(preview);
         } catch {
           // Ungültige oder abgelaufene Vorschau-Tokens werden still verworfen.
         }
-      }
+      } else
+        void apiRequest<{
+          customerId: number;
+          employeeId: number;
+          expiresAt: number;
+        }>(`/api/portal-previews/${encodeURIComponent(previewToken)}`, {
+          method: "DELETE",
+        })
+          .then(activatePreview)
+          .catch(() => {
+            // Ungültige oder bereits verwendete Vorschau-Links öffnen den Login.
+          });
     }
   }, []);
-  /* eslint-enable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (portalSession) {
       const customer = customers.find(
@@ -2671,30 +2687,30 @@ export function PrintcenterApp({
     startCustomerSession(customer, employee);
     return true;
   }
-  function openPortalPreview(customerId: number, employee: Employee) {
+  async function openPortalPreview(customerId: number, employee: Employee) {
     const customer = customers.find((item) => item.id === customerId);
     if (!customer) return;
-    const token = crypto.randomUUID();
-    window.localStorage.setItem(
-      `printcenter:portal-preview:${token}`,
-      JSON.stringify({
-        customerId,
-        employeeId: employee.id,
-        expiresAt: Date.now() + 60_000,
-      }),
-    );
-    window.setTimeout(
-      () =>
-        window.localStorage.removeItem(
-          `printcenter:portal-preview:${token}`,
-        ),
-      60_000,
-    );
-    window.open(
-      `/${customer.number}#portal-preview=${encodeURIComponent(token)}`,
-      "_blank",
-      "noopener,noreferrer",
-    );
+    const previewWindow = window.open("about:blank", "_blank");
+    if (previewWindow) previewWindow.opener = null;
+    try {
+      const preview = await apiRequest<{ token: string }>(
+        "/api/portal-previews",
+        {
+          method: "POST",
+          body: JSON.stringify({ customerId, employeeId: employee.id }),
+        },
+      );
+      const previewUrl = `/${customer.number}#portal-preview=${encodeURIComponent(preview.token)}`;
+      if (previewWindow) previewWindow.location.replace(previewUrl);
+      else window.location.assign(previewUrl);
+    } catch (error) {
+      previewWindow?.close();
+      setNotice(
+        error instanceof Error
+          ? error.message
+          : "Das Kundenportal konnte nicht geöffnet werden.",
+      );
+    }
   }
   function leavePortal() {
     const customer = customers.find(
