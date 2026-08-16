@@ -264,6 +264,7 @@ export const documents = sqliteTable(
     supplierLeadTime: text("supplier_lead_time"),
     supplierDeliveryDate: text("supplier_delivery_date"),
     supplierDeliveryNote: text("supplier_delivery_note"),
+    supplierReference: text("supplier_reference"),
     bindingDeliveryConfirmationDue: text("binding_delivery_confirmation_due"),
     requestedQuantitiesJson: text("requested_quantities_json")
       .notNull()
@@ -391,6 +392,14 @@ export const workflowSettings = sqliteTable("workflow_settings", {
     .notNull()
     .default(
       "Guten Tag {salutation} {lastName},\n\nIhr persönlicher Zugang zum Kundenportal von {company} ist eingerichtet.\n\nPortal: {portalUrl}\nLogin: {email}\nPasswort: {password}\n\nBitte bewahren Sie diese Zugangsdaten sicher auf.\n\nFreundliche Grüsse\nPrintcenter",
+    ),
+  backendPasswordResetSubject: text("backend_password_reset_subject")
+    .notNull()
+    .default("Passwort für Printcenter zurücksetzen"),
+  backendPasswordResetTemplate: text("backend_password_reset_template")
+    .notNull()
+    .default(
+      "Guten Tag {name},\n\nüber den folgenden Link können Sie Ihr Passwort für das Printcenter-Backend neu setzen:\n\n{resetUrl}\n\nDer Link ist {expiresIn} gültig und kann nur einmal verwendet werden. Falls Sie diese Änderung nicht angefordert haben, können Sie diese E-Mail ignorieren.\n\nFreundliche Grüsse\nPrintcenter",
     ),
   supplierOfferSubject: text("supplier_offer_subject").notNull(),
   offerEmail: text("offer_email").notNull(),

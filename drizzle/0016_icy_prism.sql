@@ -1,0 +1,1 @@
+ALTER TABLE `documents` ADD `supplier_reference` text;

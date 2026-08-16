@@ -174,6 +174,7 @@ type StateDocument = {
   supplierLeadTime?: string;
   supplierDeliveryDate?: string;
   supplierDeliveryNote?: string;
+  supplierReference?: string;
   bindingDeliveryConfirmationDue?: string;
   note?: string;
   requestText?: string;
@@ -209,6 +210,8 @@ type StateWorkflow = {
   confirmationTemplate: string;
   employeeLoginSubject: string;
   employeeLoginTemplate: string;
+  backendPasswordResetSubject: string;
+  backendPasswordResetTemplate: string;
   supplierOfferSubject: string;
   offerEmail: string;
   orderEmail: string;
@@ -669,7 +672,7 @@ async function ensureFullSchema(db: D1Database) {
       "CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'requested', customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL, customer_employee_id INTEGER REFERENCES customer_employees(id) ON DELETE SET NULL, article_id INTEGER REFERENCES articles(id) ON DELETE SET NULL, supplier_id INTEGER REFERENCES suppliers(id) ON DELETE SET NULL, supplier_group_id INTEGER REFERENCES supplier_groups(id) ON DELETE SET NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
     ),
     db.prepare(
-      "CREATE TABLE IF NOT EXISTS documents (id INTEGER PRIMARY KEY AUTOINCREMENT, document_number TEXT NOT NULL UNIQUE, type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'draft', customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL, customer_employee_id INTEGER REFERENCES customer_employees(id) ON DELETE SET NULL, supplier_id INTEGER REFERENCES suppliers(id) ON DELETE SET NULL, subtotal REAL NOT NULL DEFAULT 0, markup_percent REAL NOT NULL DEFAULT 0, markup_amount REAL NOT NULL DEFAULT 0, total REAL NOT NULL DEFAULT 0, issued_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE, supplier_token TEXT, delivery_date TEXT, supplier_lead_time TEXT, supplier_delivery_date TEXT, supplier_delivery_note TEXT, binding_delivery_confirmation_due TEXT, requested_quantities_json TEXT NOT NULL DEFAULT '[]', note TEXT, request_text TEXT, document_text TEXT, supplier_note TEXT, attach_document INTEGER NOT NULL DEFAULT 1, attach_gzd INTEGER NOT NULL DEFAULT 1, print_file_key TEXT, supplier_gzd_key TEXT, gzd_status TEXT, pdf_object_key TEXT, payload TEXT NOT NULL DEFAULT '{}')",
+      "CREATE TABLE IF NOT EXISTS documents (id INTEGER PRIMARY KEY AUTOINCREMENT, document_number TEXT NOT NULL UNIQUE, type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'draft', customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL, customer_employee_id INTEGER REFERENCES customer_employees(id) ON DELETE SET NULL, supplier_id INTEGER REFERENCES suppliers(id) ON DELETE SET NULL, subtotal REAL NOT NULL DEFAULT 0, markup_percent REAL NOT NULL DEFAULT 0, markup_amount REAL NOT NULL DEFAULT 0, total REAL NOT NULL DEFAULT 0, issued_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE, supplier_token TEXT, delivery_date TEXT, supplier_lead_time TEXT, supplier_delivery_date TEXT, supplier_delivery_note TEXT, supplier_reference TEXT, binding_delivery_confirmation_due TEXT, requested_quantities_json TEXT NOT NULL DEFAULT '[]', note TEXT, request_text TEXT, document_text TEXT, supplier_note TEXT, attach_document INTEGER NOT NULL DEFAULT 1, attach_gzd INTEGER NOT NULL DEFAULT 1, print_file_key TEXT, supplier_gzd_key TEXT, gzd_status TEXT, pdf_object_key TEXT, payload TEXT NOT NULL DEFAULT '{}')",
     ),
     db.prepare(
       "CREATE TABLE IF NOT EXISTS document_lines (id INTEGER PRIMARY KEY AUTOINCREMENT, document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE, article_id INTEGER REFERENCES articles(id) ON DELETE SET NULL, title TEXT NOT NULL, quantity INTEGER NOT NULL, unit_price REAL NOT NULL, line_total REAL NOT NULL)",
@@ -684,7 +687,7 @@ async function ensureFullSchema(db: D1Database) {
       "CREATE TABLE IF NOT EXISTS backend_users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, role TEXT NOT NULL DEFAULT 'operator', password_hash TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
     ),
     db.prepare(
-      "CREATE TABLE IF NOT EXISTS workflow_settings (id INTEGER PRIMARY KEY AUTOINCREMENT, request_template TEXT NOT NULL, offer_template TEXT NOT NULL, order_template TEXT NOT NULL, confirmation_template TEXT NOT NULL, employee_login_subject TEXT NOT NULL DEFAULT 'Ihr Zugang zum Printcenter von {company}', employee_login_template TEXT NOT NULL DEFAULT 'Guten Tag {salutation} {lastName},\\n\\nIhr persönlicher Zugang zum Kundenportal von {company} ist eingerichtet.\\n\\nPortal: {portalUrl}\\nLogin: {email}\\nPasswort: {password}\\n\\nBitte bewahren Sie diese Zugangsdaten sicher auf.\\n\\nFreundliche Grüsse\\nPrintcenter', supplier_offer_subject TEXT NOT NULL, offer_email TEXT NOT NULL, order_email TEXT NOT NULL, attach_request_document INTEGER NOT NULL DEFAULT 1, attach_request_gzd INTEGER NOT NULL DEFAULT 1, attach_offer_document INTEGER NOT NULL DEFAULT 1, attach_offer_gzd INTEGER NOT NULL DEFAULT 1, attach_order_document INTEGER NOT NULL DEFAULT 1, attach_order_gzd INTEGER NOT NULL DEFAULT 1, attach_confirmation_document INTEGER NOT NULL DEFAULT 1, attach_confirmation_gzd INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+      "CREATE TABLE IF NOT EXISTS workflow_settings (id INTEGER PRIMARY KEY AUTOINCREMENT, request_template TEXT NOT NULL, offer_template TEXT NOT NULL, order_template TEXT NOT NULL, confirmation_template TEXT NOT NULL, employee_login_subject TEXT NOT NULL DEFAULT 'Ihr Zugang zum Printcenter von {company}', employee_login_template TEXT NOT NULL DEFAULT 'Guten Tag {salutation} {lastName},\\n\\nIhr persönlicher Zugang zum Kundenportal von {company} ist eingerichtet.\\n\\nPortal: {portalUrl}\\nLogin: {email}\\nPasswort: {password}\\n\\nBitte bewahren Sie diese Zugangsdaten sicher auf.\\n\\nFreundliche Grüsse\\nPrintcenter', backend_password_reset_subject TEXT NOT NULL DEFAULT 'Passwort für Printcenter zurücksetzen', backend_password_reset_template TEXT NOT NULL DEFAULT 'Guten Tag {name},\\n\\nüber den folgenden Link können Sie Ihr Passwort für das Printcenter-Backend neu setzen:\\n\\n{resetUrl}\\n\\nDer Link ist {expiresIn} gültig und kann nur einmal verwendet werden. Falls Sie diese Änderung nicht angefordert haben, können Sie diese E-Mail ignorieren.\\n\\nFreundliche Grüsse\\nPrintcenter', supplier_offer_subject TEXT NOT NULL, offer_email TEXT NOT NULL, order_email TEXT NOT NULL, attach_request_document INTEGER NOT NULL DEFAULT 1, attach_request_gzd INTEGER NOT NULL DEFAULT 1, attach_offer_document INTEGER NOT NULL DEFAULT 1, attach_offer_gzd INTEGER NOT NULL DEFAULT 1, attach_order_document INTEGER NOT NULL DEFAULT 1, attach_order_gzd INTEGER NOT NULL DEFAULT 1, attach_confirmation_document INTEGER NOT NULL DEFAULT 1, attach_confirmation_gzd INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
     ),
     db.prepare(
       "CREATE TABLE IF NOT EXISTS integration_settings (id INTEGER PRIMARY KEY, navision_endpoint TEXT NOT NULL DEFAULT '', navision_tenant TEXT NOT NULL DEFAULT '', api_base_url TEXT NOT NULL DEFAULT '', api_client_id TEXT NOT NULL DEFAULT '', ftp_protocol TEXT NOT NULL DEFAULT 'SFTP', ftp_host TEXT NOT NULL DEFAULT '', ftp_port TEXT NOT NULL DEFAULT '22', ftp_username TEXT NOT NULL DEFAULT '', ftp_directory TEXT NOT NULL DEFAULT '/printcenter', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
@@ -739,6 +742,7 @@ async function ensureFullSchema(db: D1Database) {
     ["supplier_lead_time", "TEXT"],
     ["supplier_delivery_date", "TEXT"],
     ["supplier_delivery_note", "TEXT"],
+    ["supplier_reference", "TEXT"],
     ["binding_delivery_confirmation_due", "TEXT"],
     ["requested_quantities_json", "TEXT NOT NULL DEFAULT '[]'"],
     ["request_text", "TEXT"],
@@ -785,6 +789,18 @@ async function ensureFullSchema(db: D1Database) {
     "workflow_settings",
     "employee_login_template",
     "TEXT",
+  );
+  await ensureColumn(
+    db,
+    "workflow_settings",
+    "backend_password_reset_subject",
+    "TEXT NOT NULL DEFAULT 'Passwort für Printcenter zurücksetzen'",
+  );
+  await ensureColumn(
+    db,
+    "workflow_settings",
+    "backend_password_reset_template",
+    "TEXT NOT NULL DEFAULT 'Guten Tag {name},\\n\\nüber den folgenden Link können Sie Ihr Passwort für das Printcenter-Backend neu setzen:\\n\\n{resetUrl}\\n\\nDer Link ist {expiresIn} gültig und kann nur einmal verwendet werden. Falls Sie diese Änderung nicht angefordert haben, können Sie diese E-Mail ignorieren.\\n\\nFreundliche Grüsse\\nPrintcenter'",
   );
   await db.prepare("PRAGMA optimize").run();
 }
@@ -2402,6 +2418,9 @@ async function sendOrderEmail(
     : selectedOption.supplierTotal ??
       selectedOption.quantity * selectedOption.unitPrice;
   const projectId = Number(offerRow.project_id || offer.projectId || offerId);
+  const supplierReference = safeMailHeader(
+    String(offer.supplierReference || ""),
+  ).slice(0, 160);
   const values = {
     supplier: offer.supplier || "Lieferant",
     customer: String(offerRow.customer_name),
@@ -2417,11 +2436,18 @@ async function sendOrderEmail(
     project: projectId,
     total: subtotal.toFixed(2),
     orderNumber,
+    supplierReference,
   };
   const orderText = renderEmailTemplate(
     String(workflow?.order_template || "").replaceAll("\\n", "\n"),
     values,
   );
+  const orderDocumentText = [
+    orderText,
+    supplierReference ? `Lieferantenreferenz: ${supplierReference}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
   const pdfDataUri = await createDocumentPdfDataUri({
     number: orderNumber,
     type: "Bestellung",
@@ -2443,12 +2469,12 @@ async function sendOrderEmail(
     supplierDeliveryDate: offer.supplierDeliveryDate,
     supplierDeliveryNote: offer.supplierDeliveryNote,
     note: offer.supplierNote,
-    documentText: orderText,
+    documentText: orderDocumentText,
     printFile: offer.printFile,
     supplierGzd: offer.supplierGzd,
     items: orderItems,
   });
-  const messageBody = `${orderText}\n\nDie Bestellung wurde vom Kunden im Kundenportal ausgelöst.\nBestellnummer: ${orderNumber}\nProjekt: ${projectId}`;
+  const messageBody = `${orderDocumentText}\n\nDie Bestellung wurde vom Kunden im Kundenportal ausgelöst.\nBestellnummer: ${orderNumber}\nProjekt: ${projectId}`;
   await sendSmtpMessage(
     sender,
     await decryptEmailPassword(env, db, sender.password_ciphertext),
@@ -2627,6 +2653,10 @@ async function readFullState(db: D1Database) {
         row.supplier_delivery_note == null
           ? undefined
           : String(row.supplier_delivery_note),
+      supplierReference:
+        row.supplier_reference == null
+          ? payload.supplierReference
+          : String(row.supplier_reference),
       bindingDeliveryConfirmationDue:
         row.binding_delivery_confirmation_due == null
           ? undefined
@@ -2666,6 +2696,14 @@ async function readFullState(db: D1Database) {
         employeeLoginTemplate: String(
           workflowRow.employee_login_template ??
             "Guten Tag {salutation} {lastName},\\n\\nIhr persönlicher Zugang zum Kundenportal von {company} ist eingerichtet.\\n\\nPortal: {portalUrl}\\nLogin: {email}\\nPasswort: {password}\\n\\nBitte bewahren Sie diese Zugangsdaten sicher auf.\\n\\nFreundliche Grüsse\\nPrintcenter",
+        ).replaceAll("\\n", "\n"),
+        backendPasswordResetSubject: String(
+          workflowRow.backend_password_reset_subject ??
+            "Passwort für Printcenter zurücksetzen",
+        ),
+        backendPasswordResetTemplate: String(
+          workflowRow.backend_password_reset_template ??
+            "Guten Tag {name},\\n\\nüber den folgenden Link können Sie Ihr Passwort für das Printcenter-Backend neu setzen:\\n\\n{resetUrl}\\n\\nDer Link ist {expiresIn} gültig und kann nur einmal verwendet werden. Falls Sie diese Änderung nicht angefordert haben, können Sie diese E-Mail ignorieren.\\n\\nFreundliche Grüsse\\nPrintcenter",
         ).replaceAll("\\n", "\n"),
         supplierOfferSubject: String(workflowRow.supplier_offer_subject),
         offerEmail: String(workflowRow.offer_email),
@@ -2937,7 +2975,7 @@ async function replaceFullState(db: D1Database, state: FullState) {
     statements.push(
       db
         .prepare(
-          "INSERT INTO documents (id, document_number, type, status, customer_id, customer_employee_id, supplier_id, subtotal, markup_percent, markup_amount, total, issued_at, project_id, supplier_token, delivery_date, supplier_lead_time, supplier_delivery_date, supplier_delivery_note, binding_delivery_confirmation_due, requested_quantities_json, note, request_text, document_text, supplier_note, attach_document, attach_gzd, print_file_key, supplier_gzd_key, gzd_status, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO documents (id, document_number, type, status, customer_id, customer_employee_id, supplier_id, subtotal, markup_percent, markup_amount, total, issued_at, project_id, supplier_token, delivery_date, supplier_lead_time, supplier_delivery_date, supplier_delivery_note, supplier_reference, binding_delivery_confirmation_due, requested_quantities_json, note, request_text, document_text, supplier_note, attach_document, attach_gzd, print_file_key, supplier_gzd_key, gzd_status, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(
           document.id,
@@ -2964,6 +3002,7 @@ async function replaceFullState(db: D1Database, state: FullState) {
           document.supplierLeadTime ?? null,
           document.supplierDeliveryDate ?? null,
           document.supplierDeliveryNote ?? null,
+          document.supplierReference ?? null,
           document.bindingDeliveryConfirmationDue ?? null,
           JSON.stringify(document.requestedQuantities ?? []),
           document.note ?? null,
@@ -3095,7 +3134,7 @@ async function replaceFullState(db: D1Database, state: FullState) {
   statements.push(
     db
       .prepare(
-        "INSERT INTO workflow_settings (id, request_template, offer_template, order_template, confirmation_template, employee_login_subject, employee_login_template, supplier_offer_subject, offer_email, order_email, attach_request_document, attach_request_gzd, attach_offer_document, attach_offer_gzd, attach_order_document, attach_order_gzd, attach_confirmation_document, attach_confirmation_gzd, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        "INSERT INTO workflow_settings (id, request_template, offer_template, order_template, confirmation_template, employee_login_subject, employee_login_template, backend_password_reset_subject, backend_password_reset_template, supplier_offer_subject, offer_email, order_email, attach_request_document, attach_request_gzd, attach_offer_document, attach_offer_gzd, attach_order_document, attach_order_gzd, attach_confirmation_document, attach_confirmation_gzd, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
       )
       .bind(
         workflow.requestTemplate,
@@ -3106,6 +3145,10 @@ async function replaceFullState(db: D1Database, state: FullState) {
           "Ihr Zugang zum Printcenter von {company}",
         workflow.employeeLoginTemplate ||
           "Guten Tag {salutation} {lastName},\n\nIhr persönlicher Zugang zum Kundenportal von {company} ist eingerichtet.\n\nPortal: {portalUrl}\nLogin: {email}\nPasswort: {password}\n\nBitte bewahren Sie diese Zugangsdaten sicher auf.\n\nFreundliche Grüsse\nPrintcenter",
+        workflow.backendPasswordResetSubject ||
+          "Passwort für Printcenter zurücksetzen",
+        workflow.backendPasswordResetTemplate ||
+          "Guten Tag {name},\n\nüber den folgenden Link können Sie Ihr Passwort für das Printcenter-Backend neu setzen:\n\n{resetUrl}\n\nDer Link ist {expiresIn} gültig und kann nur einmal verwendet werden. Falls Sie diese Änderung nicht angefordert haben, können Sie diese E-Mail ignorieren.\n\nFreundliche Grüsse\nPrintcenter",
         workflow.supplierOfferSubject,
         workflow.offerEmail,
         workflow.orderEmail,
@@ -3237,6 +3280,9 @@ async function handleDirectoryApi(
   const portalPreviewMatch = url.pathname.match(
     /^\/api\/portal-previews\/([0-9a-f-]{36})$/i,
   );
+  const backendPasswordResetMatch = url.pathname.match(
+    /^\/api\/backend-password-resets\/([0-9a-f-]{36})$/i,
+  );
   if (url.pathname === "/api/database/health" && request.method === "GET")
     return json(await databaseHealth(db));
   if (url.pathname === "/api/integrations" && request.method === "GET")
@@ -3256,9 +3302,154 @@ async function handleDirectoryApi(
   if (request.method === "GET" && url.pathname === "/api/directory")
     return json(await readDirectory(db));
   const body =
-    request.method === "GET" || request.method === "DELETE"
+    request.method === "GET" ||
+    request.method === "DELETE" ||
+    Boolean(portalPreviewMatch)
       ? {}
       : await request.json<Record<string, unknown>>();
+
+  if (
+    url.pathname === "/api/backend-password-resets" &&
+    request.method === "POST"
+  ) {
+    if (!sameOriginRequest(request, url, env))
+      return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
+    const userId = Number(body.userId);
+    if (!Number.isInteger(userId) || userId <= 0)
+      return json({ error: "Der Backend-Zugang ist ungültig." }, { status: 400 });
+    const user = await db
+      .prepare(
+        "SELECT id, name, email FROM backend_users WHERE id = ? AND active = 1 LIMIT 1",
+      )
+      .bind(userId)
+      .first<{ id: number; name: string; email: string }>();
+    if (!user)
+      return json(
+        { error: "Der aktive Backend-Zugang wurde nicht gefunden." },
+        { status: 404 },
+      );
+    const sender = await db
+      .prepare(
+        "SELECT * FROM email_sender_profiles WHERE active = 1 ORDER BY is_default DESC, id LIMIT 1",
+      )
+      .first<EmailSenderRow>();
+    if (!sender?.password_ciphertext)
+      return json(
+        {
+          error:
+            "Bitte zuerst unter E-Mail-Einstellungen einen aktiven SMTP-Absender einrichten.",
+        },
+        { status: 400 },
+      );
+    const workflow = await db
+      .prepare(
+        "SELECT backend_password_reset_subject, backend_password_reset_template FROM workflow_settings ORDER BY id LIMIT 1",
+      )
+      .first<Record<string, string | null>>();
+    const token = crypto.randomUUID();
+    const expiresAt = Date.now() + 30 * 60_000;
+    const resetUrl = `${publicAppOrigin(env, url)}/backend/passwort-zuruecksetzen/${token}`;
+    const values = {
+      name: String(user.name),
+      email: String(user.email),
+      resetUrl,
+      expiresIn: "30 Minuten",
+    };
+    const subject = renderEmailTemplate(
+      String(
+        workflow?.backend_password_reset_subject ??
+          "Passwort für Printcenter zurücksetzen",
+      ),
+      values,
+    ).replace(/[\r\n]+/g, " ");
+    const messageBody = renderEmailTemplate(
+      String(
+        workflow?.backend_password_reset_template ??
+          "Guten Tag {name},\\n\\nüber den folgenden Link können Sie Ihr Passwort für das Printcenter-Backend neu setzen:\\n\\n{resetUrl}\\n\\nDer Link ist {expiresIn} gültig und kann nur einmal verwendet werden. Falls Sie diese Änderung nicht angefordert haben, können Sie diese E-Mail ignorieren.\\n\\nFreundliche Grüsse\\nPrintcenter",
+      ).replaceAll("\\n", "\n"),
+      values,
+    );
+    await db
+      .prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)")
+      .bind(
+        `backend_password_reset:${token}`,
+        JSON.stringify({ userId: user.id, expiresAt }),
+      )
+      .run();
+    try {
+      await sendSmtpMessage(
+        sender,
+        await decryptEmailPassword(env, db, sender.password_ciphertext),
+        String(user.email),
+        subject,
+        messageBody,
+      );
+      return json({
+        ok: true,
+        message: `Der Reset-Link wurde an ${user.email} gesendet.`,
+      });
+    } catch (error) {
+      await db
+        .prepare("DELETE FROM app_meta WHERE key = ?")
+        .bind(`backend_password_reset:${token}`)
+        .run();
+      return json(
+        {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Der Reset-Link konnte nicht versendet werden.",
+        },
+        { status: 400 },
+      );
+    }
+  }
+
+  if (backendPasswordResetMatch && request.method === "POST") {
+    if (!sameOriginRequest(request, url, env))
+      return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
+    const password = String(body.password || "");
+    if (password.length < 8)
+      return json(
+        { error: "Das Passwort muss mindestens 8 Zeichen haben." },
+        { status: 400 },
+      );
+    const token = backendPasswordResetMatch[1].toLowerCase();
+    const key = `backend_password_reset:${token}`;
+    const stored = await db
+      .prepare("SELECT value FROM app_meta WHERE key = ? LIMIT 1")
+      .bind(key)
+      .first<{ value: string }>();
+    if (!stored?.value)
+      return json(
+        { error: "Dieser Reset-Link ist ungültig oder wurde bereits verwendet." },
+        { status: 404 },
+      );
+    const reset = parseJson<{ userId: number; expiresAt: number }>(
+      stored.value,
+      { userId: 0, expiresAt: 0 },
+    );
+    if (reset.expiresAt < Date.now()) {
+      await db.prepare("DELETE FROM app_meta WHERE key = ?").bind(key).run();
+      return json(
+        { error: "Dieser Reset-Link ist abgelaufen. Bitte fordern Sie einen neuen an." },
+        { status: 410 },
+      );
+    }
+    const result = await db
+      .prepare(
+        "UPDATE backend_users SET password_hash = ? WHERE id = ? AND active = 1",
+      )
+      .bind(password, reset.userId)
+      .run();
+    if (!result.meta.changes)
+      return json(
+        { error: "Der Backend-Zugang wurde nicht gefunden." },
+        { status: 404 },
+      );
+    await db.prepare("DELETE FROM app_meta WHERE key = ?").bind(key).run();
+    return json({ ok: true });
+  }
 
   if (url.pathname === "/api/portal-previews" && request.method === "POST") {
     if (!sameOriginRequest(request, url, env))
@@ -3297,7 +3488,10 @@ async function handleDirectoryApi(
       .run();
     return json({ token, expiresAt }, { status: 201 });
   }
-  if (portalPreviewMatch && request.method === "DELETE") {
+  if (
+    portalPreviewMatch &&
+    (request.method === "POST" || request.method === "DELETE")
+  ) {
     const token = portalPreviewMatch[1].toLowerCase();
     const key = `portal_preview:${token}`;
     const stored = await db

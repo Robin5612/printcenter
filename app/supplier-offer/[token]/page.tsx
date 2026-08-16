@@ -1,4 +1,9 @@
+import type { Metadata } from "next";
 import { PrintcenterApp } from "../../page";
+
+export const metadata: Metadata = {
+  title: "Printcenter",
+};
 
 export default async function SupplierOfferRoute({
   params,

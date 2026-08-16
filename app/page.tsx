@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { createDocumentPdfDataUri, downloadDocumentPdf } from "./document-pdf";
 import { completeSupplierTier } from "./price-calculation";
 
@@ -16,7 +17,12 @@ type View =
   | "Belege"
   | "Artikel"
   | "Einstellungen";
-type EntryRoute = "customer-home" | "backend" | "customer" | "supplier";
+type EntryRoute =
+  | "customer-home"
+  | "backend"
+  | "backend-reset"
+  | "customer"
+  | "supplier";
 type Salutation = "Frau" | "Herr" | "Divers";
 type Employee = {
   id: number;
@@ -128,6 +134,7 @@ type DocumentRecord = {
   supplierLeadTime?: string;
   supplierDeliveryDate?: string;
   supplierDeliveryNote?: string;
+  supplierReference?: string;
   bindingDeliveryConfirmationDue?: string;
   note?: string;
   requestText?: string;
@@ -152,6 +159,8 @@ type WorkflowSettings = {
   confirmationTemplate: string;
   employeeLoginSubject: string;
   employeeLoginTemplate: string;
+  backendPasswordResetSubject: string;
+  backendPasswordResetTemplate: string;
   supplierOfferSubject: string;
   offerEmail: string;
   orderEmail: string;
@@ -820,6 +829,9 @@ const initialWorkflowSettings: WorkflowSettings = {
   employeeLoginSubject: "Ihr Zugang zum Printcenter von {company}",
   employeeLoginTemplate:
     "Guten Tag {salutation} {lastName},\n\nIhr persönlicher Zugang zum Kundenportal von {company} ist eingerichtet.\n\nPortal: {portalUrl}\nLogin: {email}\nPasswort: {password}\n\nBitte bewahren Sie diese Zugangsdaten sicher auf.\n\nFreundliche Grüsse\nPrintcenter",
+  backendPasswordResetSubject: "Passwort für Printcenter zurücksetzen",
+  backendPasswordResetTemplate:
+    "Guten Tag {name},\n\nüber den folgenden Link können Sie Ihr Passwort für das Printcenter-Backend neu setzen:\n\n{resetUrl}\n\nDer Link ist {expiresIn} gültig und kann nur einmal verwendet werden. Falls Sie diese Änderung nicht angefordert haben, können Sie diese E-Mail ignorieren.\n\nFreundliche Grüsse\nPrintcenter",
   supplierOfferSubject: "Neue Lieferantenofferte für {project}",
   offerEmail: "angebote@printcenter.ch",
   orderEmail: "",
@@ -858,10 +870,12 @@ export function PrintcenterApp({
   initialRoute,
   initialPortalNumber,
   initialSupplierToken,
+  initialBackendResetToken,
 }: {
   initialRoute: EntryRoute;
   initialPortalNumber?: string;
   initialSupplierToken?: string;
+  initialBackendResetToken?: string;
 }) {
   const [view, setView] = useState<View>("Übersicht");
   const [customers, setCustomers] = useState(initialCustomers);
@@ -895,10 +909,13 @@ export function PrintcenterApp({
   const [backendSession, setBackendSession] = useState<BackendUser | null>(
     null,
   );
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [profileSettingsOpen, setProfileSettingsOpen] = useState(false);
   const [workflowSettings, setWorkflowSettings] = useState<WorkflowSettings>(
     initialWorkflowSettings,
   );
   const [databaseReady, setDatabaseReady] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [backendClock, setBackendClock] = useState("");
   const [backendNow, setBackendNow] = useState(0);
   useEffect(() => {
@@ -1060,6 +1077,7 @@ export function PrintcenterApp({
       }
       if (
         initialRoute !== "backend" &&
+        initialRoute !== "backend-reset" &&
         initialRoute !== "supplier" &&
         !portalSession
       ) {
@@ -1106,6 +1124,28 @@ export function PrintcenterApp({
     portalSession,
   ]);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  async function refreshData() {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      const stored = await apiRequest<PersistedState>("/api/state");
+      setCustomers(stored.customers);
+      setSuppliers(stored.suppliers);
+      setGroups(stored.groups);
+      setArticles(stored.articles.map(normalizeArticle));
+      setDocuments(stored.documents);
+      setBackendUsers(stored.backendUsers);
+      setWorkflowSettings({
+        ...initialWorkflowSettings,
+        ...(stored.workflowSettings ?? {}),
+      });
+    } catch {
+      // Die bestehende Ansicht bleibt erhalten, falls die Aktualisierung scheitert.
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   async function saveCustomer(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1935,6 +1975,7 @@ export function PrintcenterApp({
     }>;
     deliveryDate: string;
     deliveryNote?: string;
+    supplierReference?: string;
     gzd?: string;
     gzdUrl?: string;
     note?: string;
@@ -2061,6 +2102,7 @@ export function PrintcenterApp({
       pdfUrl: undefined,
       supplierDeliveryDate: data.deliveryDate,
       supplierDeliveryNote: data.deliveryNote?.trim() || undefined,
+      supplierReference: data.supplierReference?.trim() || undefined,
       supplierLeadTime: undefined,
       documentText,
       attachDocument: offerWorkflow.attachDocument,
@@ -2093,6 +2135,7 @@ export function PrintcenterApp({
           items: data.items,
           deliveryDate: data.deliveryDate,
           deliveryNote: data.deliveryNote,
+          supplierReference: data.supplierReference,
           gzd: data.gzd,
           gzdUrl: supplierGzdUrl,
           note: data.note,
@@ -2176,6 +2219,9 @@ export function PrintcenterApp({
     const bindingNotice = offer.supplierDeliveryDate
       ? `Das vom Lieferanten eingetragene Lieferdatum ${offer.supplierDeliveryDate} ist bei Bestellung innerhalb von 72 Stunden nach Angebotsabgabe verbindlich.`
       : "";
+    const supplierReferenceLine = offer.supplierReference
+      ? `Lieferantenreferenz: ${offer.supplierReference}`
+      : "";
     const orderText = renderTemplate(orderWorkflow.template, {
       supplier: offer.supplier ?? "Lieferant",
       customer: offer.customer,
@@ -2188,6 +2234,7 @@ export function PrintcenterApp({
       note: offer.supplierDeliveryNote ?? offer.supplierNote ?? "",
       project: offer.projectId ?? offer.id,
       total: orderSubtotal,
+      supplierReference: offer.supplierReference ?? "",
     });
     const orderItems: DocumentItem[] | undefined = selectedItems?.map(
       ({ source, option: selectedOption, subtotal: itemSubtotal }) => ({
@@ -2216,8 +2263,15 @@ export function PrintcenterApp({
       createdAt: new Date(orderId).toISOString(),
       pdfUrl: undefined,
       bindingDeliveryConfirmationDue: undefined,
-      documentText: [orderText, bindingNotice].filter(Boolean).join("\n\n"),
-      note: [offer.supplierDeliveryNote, offer.supplierNote, bindingNotice]
+      documentText: [orderText, supplierReferenceLine, bindingNotice]
+        .filter(Boolean)
+        .join("\n\n"),
+      note: [
+        offer.supplierReference ? `Referenz: ${offer.supplierReference}` : "",
+        offer.supplierDeliveryNote,
+        offer.supplierNote,
+        bindingNotice,
+      ]
         .filter(Boolean)
         .join("\n\n"),
       attachDocument: orderWorkflow.attachDocument,
@@ -2590,6 +2644,12 @@ export function PrintcenterApp({
             expiresAt: number;
           };
           activatePreview(preview);
+          void apiRequest(
+            `/api/portal-previews/${encodeURIComponent(previewToken)}`,
+            { method: "POST" },
+          ).catch(() => {
+            // Die lokale Freigabe ist bereits aktiv; die Serverbereinigung ist optional.
+          });
         } catch {
           // Ungültige oder abgelaufene Vorschau-Tokens werden still verworfen.
         }
@@ -2599,7 +2659,7 @@ export function PrintcenterApp({
           employeeId: number;
           expiresAt: number;
         }>(`/api/portal-previews/${encodeURIComponent(previewToken)}`, {
-          method: "DELETE",
+          method: "POST",
         })
           .then(activatePreview)
           .catch(() => {
@@ -2679,16 +2739,29 @@ export function PrintcenterApp({
     const previewWindow = window.open("about:blank", "_blank");
     if (previewWindow) previewWindow.opener = null;
     try {
-      const preview = await apiRequest<{ token: string }>(
+      const preview = await apiRequest<{ token: string; expiresAt: number }>(
         "/api/portal-previews",
         {
           method: "POST",
           body: JSON.stringify({ customerId, employeeId: employee.id }),
         },
       );
-      const previewUrl = `/${customer.number}#portal-preview=${encodeURIComponent(preview.token)}`;
-      if (previewWindow) previewWindow.location.replace(previewUrl);
-      else window.location.assign(previewUrl);
+      try {
+        window.localStorage.setItem(
+          `printcenter:portal-preview:${preview.token}`,
+          JSON.stringify({
+            customerId,
+            employeeId: employee.id,
+            expiresAt: preview.expiresAt,
+          }),
+        );
+      } catch {
+        // Ohne Browserspeicher wird die einmalige Freigabe vom Server eingelöst.
+      }
+      const previewUrl = new URL(`/${customer.number}`, window.location.origin);
+      previewUrl.hash = `portal-preview=${encodeURIComponent(preview.token)}`;
+      if (previewWindow) previewWindow.location.replace(previewUrl.href);
+      else window.location.assign(previewUrl.href);
     } catch (error) {
       previewWindow?.close();
       setNotice(
@@ -2752,14 +2825,32 @@ export function PrintcenterApp({
     email: string,
     password: string,
   ) {
+    const normalizedName = name.trim();
+    const normalizedEmail = email.trim();
     setBackendUsers((current) =>
       current.map((user) =>
         user.id === id
-          ? { ...user, name, email, password: password || user.password }
+          ? {
+              ...user,
+              name: normalizedName,
+              email: normalizedEmail,
+              password: password || user.password,
+            }
           : user,
       ),
     );
-    setNotice(`${name} wurde aktualisiert.`);
+    if (backendSession?.id === id)
+      setBackendSession((current) =>
+        current
+          ? {
+              ...current,
+              name: normalizedName,
+              email: normalizedEmail,
+              password: password || current.password,
+            }
+          : current,
+      );
+    setNotice(`${normalizedName} wurde aktualisiert.`);
   }
   function toggleBackendUser(user: BackendUser) {
     setBackendUsers((current) =>
@@ -2791,6 +2882,8 @@ export function PrintcenterApp({
     return (
       <SupplierPortal request={supplierRequest} onExit={leaveSupplierPortal} />
     );
+  if (initialRoute === "backend-reset" && initialBackendResetToken)
+    return <BackendPasswordReset token={initialBackendResetToken} />;
   const portalCustomer = portalRoute
     ? customers.find(
         (item) => item.number.toLowerCase() === portalRoute.toLowerCase(),
@@ -2824,6 +2917,8 @@ export function PrintcenterApp({
             )
           }
           onMinimumChange={updateArticleMinimum}
+          onRefresh={refreshData}
+          refreshing={refreshing}
           backendPreview={portalSession.source === "backend-preview"}
         />
       );
@@ -2875,6 +2970,16 @@ export function PrintcenterApp({
           </div>
           <div className="topbar-actions">
             <button
+              className="portal-button refresh-button"
+              type="button"
+              onClick={() => void refreshData()}
+              disabled={refreshing}
+              aria-label="Daten aktualisieren"
+            >
+              <span aria-hidden="true">↻</span>{" "}
+              {refreshing ? "Aktualisiert …" : "Aktualisieren"}
+            </button>
+            <button
               className="portal-button"
               onClick={() => {
                 const customer = customers[0];
@@ -2885,24 +2990,50 @@ export function PrintcenterApp({
             >
               Kundenportal ↗
             </button>
-            <button
-              className="profile"
-              aria-label="Abmelden"
-              title="Abmelden"
-              onClick={() => {
-                try {
-                  window.localStorage.removeItem(backendSessionStorageKey);
-                } catch {
-                  // Die Sitzung wird mindestens im aktuellen Tab beendet.
-                }
-                setBackendSession(null);
-              }}
-            >
-              {backendSession.name
-                .split(" ")
-                .map((part) => part[0])
-                .join("")}
-            </button>
+            <div className="profile-menu-wrap">
+              <button
+                className="profile"
+                aria-label="Persönliche Einstellungen öffnen"
+                title="Persönliche Einstellungen"
+                aria-expanded={profileMenuOpen}
+                onClick={() => setProfileMenuOpen((current) => !current)}
+              >
+                {backendSession.name
+                  .split(" ")
+                  .map((part) => part[0])
+                  .join("")}
+              </button>
+              {profileMenuOpen && (
+                <div className="profile-menu">
+                  <strong>{backendSession.name}</strong>
+                  <small>{backendSession.email}</small>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setProfileMenuOpen(false);
+                      setProfileSettingsOpen(true);
+                    }}
+                  >
+                    Meine Einstellungen
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      try {
+                        window.localStorage.removeItem(
+                          backendSessionStorageKey,
+                        );
+                      } catch {
+                        // Die Sitzung wird mindestens im aktuellen Tab beendet.
+                      }
+                      setBackendSession(null);
+                    }}
+                  >
+                    Abmelden
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </header>
         <div className="content">
@@ -3026,6 +3157,12 @@ export function PrintcenterApp({
                   employeeLoginTemplate: String(
                     data.get("employeeLoginTemplate") || "",
                   ),
+                  backendPasswordResetSubject: String(
+                    data.get("backendPasswordResetSubject") || "",
+                  ),
+                  backendPasswordResetTemplate: String(
+                    data.get("backendPasswordResetTemplate") || "",
+                  ),
                   supplierOfferSubject: String(
                     data.get("supplierOfferSubject") || "",
                   ),
@@ -3055,6 +3192,17 @@ export function PrintcenterApp({
           )}
         </div>
       </section>
+      {profileSettingsOpen && (
+        <BackendProfileSettings
+          user={backendSession}
+          users={backendUsers}
+          onClose={() => setProfileSettingsOpen(false)}
+          onSave={(name, email) => {
+            updateBackendUser(backendSession.id, name, email, "");
+            setProfileSettingsOpen(false);
+          }}
+        />
+      )}
     </main>
   );
 }
@@ -3256,6 +3404,28 @@ function CustomersView({
   const [editingEmployeeId, setEditingEmployeeId] = useState<number | null>(
     null,
   );
+  const [customerNameQuery, setCustomerNameQuery] = useState("");
+  const [customerNumberQuery, setCustomerNumberQuery] = useState("");
+  const [employeeQuery, setEmployeeQuery] = useState("");
+  const normalizeCustomerFilter = (value: string) =>
+    value.trim().toLocaleLowerCase("de-CH");
+  const filteredCustomers = customers.filter((customer) => {
+    const nameQuery = normalizeCustomerFilter(customerNameQuery);
+    const numberQuery = normalizeCustomerFilter(customerNumberQuery);
+    const staffQuery = normalizeCustomerFilter(employeeQuery);
+    return (
+      (!nameQuery ||
+        normalizeCustomerFilter(customer.name).includes(nameQuery)) &&
+      (!numberQuery ||
+        normalizeCustomerFilter(customer.number).includes(numberQuery)) &&
+      (!staffQuery ||
+        customer.employees.some((employee) =>
+          normalizeCustomerFilter(
+            `${employeeDisplayName(employee)} ${employee.email}`,
+          ).includes(staffQuery),
+        ))
+    );
+  });
   function toggleCustomer(customer: Customer) {
     const open = expandedCustomerId === customer.id;
     setExpandedCustomerId(open ? null : customer.id);
@@ -3280,6 +3450,40 @@ function CustomersView({
           onCancel={() => setFormMode(null)}
         />
       )}
+      {customers.length > 0 && (
+        <div className="customer-filter-bar" aria-label="Kunden filtern">
+          <label>
+            Kundenname
+            <input
+              type="search"
+              value={customerNameQuery}
+              onChange={(event) => setCustomerNameQuery(event.target.value)}
+              placeholder="Firma suchen"
+            />
+          </label>
+          <label>
+            Kundennummer
+            <input
+              type="search"
+              value={customerNumberQuery}
+              onChange={(event) => setCustomerNumberQuery(event.target.value)}
+              placeholder="z. B. K-10024"
+            />
+          </label>
+          <label>
+            Mitarbeitende
+            <input
+              type="search"
+              value={employeeQuery}
+              onChange={(event) => setEmployeeQuery(event.target.value)}
+              placeholder="Name oder Login-Mail"
+            />
+          </label>
+          <span>
+            {filteredCustomers.length} von {customers.length} Kunden
+          </span>
+        </div>
+      )}
       {customers.length === 0 ? (
         <div className="directory-empty">
           <strong>Noch keine Kunden vorhanden.</strong>
@@ -3302,7 +3506,7 @@ function CustomersView({
             <span />
           </div>
           <div className="customer-accordion-list">
-            {customers.map((customer) => {
+            {filteredCustomers.map((customer) => {
               const expanded = expandedCustomerId === customer.id;
               const editingEmployee = customer.employees.find(
                 (employee) => employee.id === editingEmployeeId,
@@ -3557,6 +3761,11 @@ function CustomersView({
                 </article>
               );
             })}
+            {filteredCustomers.length === 0 && (
+              <div className="directory-filter-empty">
+                Keine Kunden entsprechen den gewählten Filtern.
+              </div>
+            )}
           </div>
         </>
       )}
@@ -5786,6 +5995,8 @@ function CustomerPortal({
   onExit,
   onReorder,
   onMinimumChange,
+  onRefresh,
+  refreshing,
   backendPreview,
 }: {
   customer: Customer;
@@ -5795,6 +6006,8 @@ function CustomerPortal({
   onExit: () => void;
   onReorder: (article: Article) => void;
   onMinimumChange: (articleId: number, minimum: number) => void;
+  onRefresh: () => void | Promise<void>;
+  refreshing: boolean;
   backendPreview: boolean;
 }) {
   const [reorderArticle, setReorderArticle] = useState<Article | null>(null);
@@ -5961,7 +6174,7 @@ function CustomerPortal({
     );
     setRequestConfirmation({
       article: `Sammelanfrage mit ${data.items.length} Artikeln`,
-      sku: collectiveSupplier ?? "Lieferant",
+      sku: `${data.items.length} Artikel`,
       mailStatus: "sending",
     });
     cancelCollectiveRequest();
@@ -6034,6 +6247,16 @@ function CustomerPortal({
               </div>
             )}
           </div>
+          <button
+            className="portal-button refresh-button"
+            type="button"
+            onClick={() => void onRefresh()}
+            disabled={refreshing}
+            aria-label="Belege und Bestände aktualisieren"
+          >
+            <span aria-hidden="true">↻</span>{" "}
+            {refreshing ? "Aktualisiert …" : "Aktualisieren"}
+          </button>
           <span className="portal-customer">
             <strong>{customer.name}</strong>
             <small>
@@ -6099,10 +6322,10 @@ function CustomerPortal({
             <div className="collective-selection-banner">
               <div>
                 <p className="eyebrow">SAMMELANFRAGE AKTIV</p>
-                <strong>{collectiveSupplier}</strong>
+                <strong>Gemeinsame Produktionsquelle</strong>
                 <span>
-                  Es können nur Artikel mit diesem Lieferanten hinzugefügt
-                  werden.
+                  Es können nur miteinander kombinierbare Artikel hinzugefügt
+                  werden. Der zuständige Lieferant bleibt vertraulich.
                 </span>
               </div>
               <button
@@ -6258,7 +6481,7 @@ function CustomerPortal({
                           ? collectiveSelected
                             ? "✓ Hinzugefügt"
                             : "+ Hinzufügen"
-                          : "Anderer Lieferant"
+                          : "Nicht kombinierbar"
                         : "Anfrage starten →"}
                     </button>
                   </div>
@@ -6289,7 +6512,7 @@ function CustomerPortal({
         >
           <span>{collectiveArticleIds.length}</span>
           <strong>Sammelanfrage prüfen</strong>
-          <small>{collectiveSupplier} →</small>
+          <small>Auswahl öffnen →</small>
         </button>
       )}
       {filter && (
@@ -7122,6 +7345,7 @@ function CollectiveSupplierOffer({
   const [gzdUploading, setGzdUploading] = useState<Record<number, boolean>>({});
   const [deliveryDate, setDeliveryDate] = useState("");
   const [deliveryNote, setDeliveryNote] = useState("");
+  const [supplierReference, setSupplierReference] = useState("");
   const [note, setNote] = useState("");
   const priceKey = (articleId: number, quantity: number) =>
     `${articleId}:${quantity}`;
@@ -7200,6 +7424,7 @@ function CollectiveSupplierOffer({
                   requestId: request.id,
                   deliveryDate,
                   deliveryNote,
+                  supplierReference,
                   note,
                   items: items.map((item) => {
                     const choice = gzdChoices[item.articleId] || "";
@@ -7396,6 +7621,16 @@ function CollectiveSupplierOffer({
             />
           </label>
           <label className="supplier-full-field">
+            Eigene Referenz
+            <input
+              type="text"
+              value={supplierReference}
+              onChange={(event) => setSupplierReference(event.target.value)}
+              maxLength={160}
+              placeholder="z. B. Offerte 4711 / Ihre Auftragsreferenz"
+            />
+          </label>
+          <label className="supplier-full-field">
             Nachricht an Printcenter
             <textarea
               value={note}
@@ -7442,6 +7677,7 @@ function SupplierPortal({
   const [gzdUploading, setGzdUploading] = useState(false);
   const [deliveryDate, setDeliveryDate] = useState("");
   const [deliveryNote, setDeliveryNote] = useState("");
+  const [supplierReference, setSupplierReference] = useState("");
   const [note, setNote] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [submissionError, setSubmissionError] = useState("");
@@ -7655,6 +7891,7 @@ function SupplierPortal({
                   options,
                   deliveryDate,
                   deliveryNote,
+                  supplierReference,
                   gzd: gzd || undefined,
                   note,
                 },
@@ -7814,6 +8051,16 @@ function SupplierPortal({
             innerhalb von 72 Stunden nach Angebotsabgabe erfolgt.
           </p>
           <label className="supplier-full-field">
+            Eigene Referenz
+            <input
+              type="text"
+              value={supplierReference}
+              onChange={(event) => setSupplierReference(event.target.value)}
+              maxLength={160}
+              placeholder="z. B. Offerte 4711 / Ihre Auftragsreferenz"
+            />
+          </label>
+          <label className="supplier-full-field">
             Nachricht an Printcenter
             <textarea
               value={note}
@@ -7836,6 +8083,215 @@ function SupplierPortal({
           </button>
         </form>
       </section>
+    </main>
+  );
+}
+
+function BackendProfileSettings({
+  user,
+  users,
+  onClose,
+  onSave,
+}: {
+  user: BackendUser;
+  users: BackendUser[];
+  onClose: () => void;
+  onSave: (name: string, email: string) => void;
+}) {
+  const [message, setMessage] = useState("");
+  const [messageKind, setMessageKind] = useState<"success" | "error">(
+    "success",
+  );
+  const [sending, setSending] = useState(false);
+  return (
+    <div className="modal-backdrop profile-settings-backdrop">
+      <section className="modal-card profile-settings-card" role="dialog">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">PERSÖNLICHE EINSTELLUNGEN</p>
+            <h2>Mein Backend-Zugang</h2>
+          </div>
+          <button className="secondary-button" type="button" onClick={onClose}>
+            Schliessen
+          </button>
+        </div>
+        <form
+          className="profile-settings-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const data = new FormData(event.currentTarget);
+            const name = String(data.get("name") || "").trim();
+            const email = String(data.get("email") || "").trim();
+            if (
+              users.some(
+                (item) =>
+                  item.id !== user.id &&
+                  item.email.toLowerCase() === email.toLowerCase(),
+              )
+            ) {
+              setMessageKind("error");
+              setMessage("Diese Mailadresse wird bereits verwendet.");
+              return;
+            }
+            onSave(name, email);
+          }}
+        >
+          <label>
+            Name
+            <input name="name" defaultValue={user.name} required />
+          </label>
+          <label>
+            Mailadresse / Login
+            <input
+              name="email"
+              type="email"
+              defaultValue={user.email}
+              required
+            />
+          </label>
+          <button className="primary-button" type="submit">
+            Daten speichern
+          </button>
+        </form>
+        <div className="profile-password-reset">
+          <div>
+            <strong>Passwort zurücksetzen</strong>
+            <p>
+              Wir senden einen einmalig verwendbaren Link an {user.email}.
+            </p>
+          </div>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={sending}
+            onClick={async () => {
+              setSending(true);
+              setMessage("");
+              try {
+                const result = await apiRequest<{ message: string }>(
+                  "/api/backend-password-resets",
+                  {
+                    method: "POST",
+                    body: JSON.stringify({ userId: user.id }),
+                  },
+                );
+                setMessageKind("success");
+                setMessage(result.message);
+              } catch (error) {
+                setMessageKind("error");
+                setMessage(
+                  error instanceof Error
+                    ? error.message
+                    : "Der Link konnte nicht versendet werden.",
+                );
+              } finally {
+                setSending(false);
+              }
+            }}
+          >
+            {sending ? "Link wird gesendet …" : "Reset-Link senden"}
+          </button>
+        </div>
+        {message && (
+          <p className={`profile-settings-message is-${messageKind}`} role="status">
+            {message}
+          </p>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function BackendPasswordReset({ token }: { token: string }) {
+  const [message, setMessage] = useState("");
+  const [complete, setComplete] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  return (
+    <main className="backend-login">
+      <section className="login-panel">
+        <div className="brand brand--login">
+          <Monogram />
+          <span>
+            print
+            <br />
+            center
+          </span>
+        </div>
+        <p className="eyebrow">BACKEND-ZUGANG</p>
+        <h1>Neues Passwort setzen.</h1>
+        {complete ? (
+          <>
+            <p className="login-copy">
+              Das Passwort wurde aktualisiert. Der Einmal-Link ist nicht mehr
+              gültig.
+            </p>
+            <Link className="primary-button login-link-button" href="/backend">
+              Zum Backend-Login →
+            </Link>
+          </>
+        ) : (
+          <form
+            onSubmit={async (event) => {
+              event.preventDefault();
+              const data = new FormData(event.currentTarget);
+              const password = String(data.get("password") || "");
+              const confirmation = String(data.get("confirmation") || "");
+              if (password.length < 8) {
+                setMessage("Das Passwort muss mindestens 8 Zeichen haben.");
+                return;
+              }
+              if (password !== confirmation) {
+                setMessage("Die beiden Passwörter stimmen nicht überein.");
+                return;
+              }
+              setSubmitting(true);
+              setMessage("");
+              try {
+                await apiRequest<{ ok: boolean }>(
+                  `/api/backend-password-resets/${encodeURIComponent(token)}`,
+                  { method: "POST", body: JSON.stringify({ password }) },
+                );
+                setComplete(true);
+              } catch (error) {
+                setMessage(
+                  error instanceof Error
+                    ? error.message
+                    : "Das Passwort konnte nicht geändert werden.",
+                );
+              } finally {
+                setSubmitting(false);
+              }
+            }}
+          >
+            <label>
+              Neues Passwort
+              <input name="password" type="password" minLength={8} required />
+            </label>
+            <label>
+              Passwort bestätigen
+              <input
+                name="confirmation"
+                type="password"
+                minLength={8}
+                required
+              />
+            </label>
+            {message && (
+              <p className="login-error" role="alert">
+                {message}
+              </p>
+            )}
+            <button className="primary-button" type="submit" disabled={submitting}>
+              {submitting ? "Passwort wird gespeichert …" : "Passwort speichern →"}
+            </button>
+          </form>
+        )}
+      </section>
+      <div className="login-art" aria-hidden="true">
+        <span />
+        <i />
+        <b />
+      </div>
     </main>
   );
 }
@@ -8112,6 +8568,30 @@ function LegacySettingsView({
               Platzhalter: {"{company}"} {"{salutation}"} {"{firstName}"}{" "}
               {"{lastName}"} {"{employee}"} {"{email}"} {"{password}"}{" "}
               {"{portalUrl}"}
+            </small>
+          </fieldset>
+          <fieldset className="employee-login-template-fieldset">
+            <legend>Backend-Passwort zurücksetzen</legend>
+            <label>
+              Betreff
+              <input
+                name="backendPasswordResetSubject"
+                defaultValue={workflow.backendPasswordResetSubject}
+                required
+              />
+            </label>
+            <label>
+              E-Mail-Text
+              <textarea
+                name="backendPasswordResetTemplate"
+                defaultValue={workflow.backendPasswordResetTemplate}
+                rows={9}
+                required
+              />
+            </label>
+            <small className="muted">
+              Platzhalter: {"{name}"} {"{email}"} {"{resetUrl}"}{" "}
+              {"{expiresIn}"}
             </small>
           </fieldset>
           <label>

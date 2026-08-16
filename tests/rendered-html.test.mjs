@@ -23,7 +23,7 @@ test("server-renders the general customer login at the root URL", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
-  assert.match(html, /<title>Printcenter · Druckproduktion im Fluss<\/title>/i);
+  assert.match(html, /<title>Printcenter<\/title>/i);
   assert.match(html, /KUNDENPORTAL/);
   assert.match(html, /Kundenlogin\./);
   assert.match(html, /Kundennummer/);
@@ -36,6 +36,7 @@ test("keeps the backend login exclusively at /backend", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
+  assert.match(html, /<title>Printcenter backend<\/title>/i);
   assert.match(html, /BACKEND-ZUGANG/);
   assert.match(html, /Backend anmelden\./);
   assert.doesNotMatch(
@@ -47,6 +48,19 @@ test("keeps the backend login exclusively at /backend", async () => {
     html,
     /codex-preview|SkeletonPreview|Your site is taking shape/i,
   );
+});
+
+test("renders the one-time backend password reset route", async () => {
+  const response = await render(
+    "/backend/passwort-zuruecksetzen/11111111-1111-4111-8111-111111111111",
+  );
+  assert.equal(response.status, 200);
+
+  const html = await response.text();
+  assert.match(html, /<title>Printcenter backend<\/title>/i);
+  assert.match(html, /Neues Passwort setzen\./);
+  assert.match(html, /Passwort bestätigen/);
+  assert.doesNotMatch(html, /Kundenlogin\./);
 });
 
 test("keeps the public customer route available", async () => {

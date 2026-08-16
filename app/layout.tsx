@@ -12,7 +12,7 @@ export async function generateMetadata(): Promise<Metadata> {
 
   return {
     metadataBase: baseUrl,
-    title: "Printcenter · Druckproduktion im Fluss",
+    title: "Printcenter",
     description: "Kunden, Lieferanten, Belege, Artikel und Nachbestellungen in einer Anwendung.",
     openGraph: {
       title: "Printcenter · Druckproduktion im Fluss",
