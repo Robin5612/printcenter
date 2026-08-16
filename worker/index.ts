@@ -233,6 +233,33 @@ type FullState = {
 const json = (data: unknown, init?: ResponseInit) =>
   Response.json(data, { headers: { "Cache-Control": "no-store" }, ...init });
 
+function requestOrigins(request: Request, url: URL) {
+  const origins = new Set([url.origin]);
+  const forwardedHost = request.headers
+    .get("X-Forwarded-Host")
+    ?.split(",")[0]
+    .trim();
+  const forwardedProto = request.headers
+    .get("X-Forwarded-Proto")
+    ?.split(",")[0]
+    .trim()
+    .toLowerCase();
+  if (
+    forwardedHost &&
+    /^(?:https?)$/.test(forwardedProto || "") &&
+    /^(?:[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)(?::\d{1,5})?$/i.test(
+      forwardedHost,
+    )
+  )
+    origins.add(`${forwardedProto}://${forwardedHost}`);
+  return origins;
+}
+
+const sameOriginRequest = (request: Request, url: URL) => {
+  const origin = request.headers.get("Origin");
+  return !origin || requestOrigins(request, url).has(origin);
+};
+
 async function ensureDirectorySchema(db: D1Database) {
   await db.batch([
     db.prepare(
@@ -1128,8 +1155,7 @@ async function sendRequestEmails(
   env: Env,
   db: D1Database,
 ) {
-  const origin = request.headers.get("Origin");
-  if (origin && origin !== url.origin)
+  if (!sameOriginRequest(request, url))
     return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
 
   await ensureFullSchema(db);
@@ -1309,7 +1335,7 @@ async function sendRequestEmails(
     try {
       const fileUrl = new URL(String(body.printFileUrl), url.origin);
       if (
-        fileUrl.origin !== url.origin ||
+        !requestOrigins(request, url).has(fileUrl.origin) ||
         !fileUrl.pathname.startsWith("/api/files/")
       )
         throw new Error("ungültiger Dateipfad");
@@ -1407,8 +1433,7 @@ async function sendCollectiveRequestEmails(
   env: Env,
   db: D1Database,
 ) {
-  const origin = request.headers.get("Origin");
-  if (origin && origin !== url.origin)
+  if (!sameOriginRequest(request, url))
     return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
   await ensureFullSchema(db);
   const customerId = Number(body.customerId);
@@ -1688,8 +1713,7 @@ async function sendCollectiveOfferEmails(
   env: Env,
   db: D1Database,
 ) {
-  const origin = request.headers.get("Origin");
-  if (origin && origin !== url.origin)
+  if (!sameOriginRequest(request, url))
     return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
   await ensureFullSchema(db);
   const requestId = Number(body.requestId);
@@ -1971,8 +1995,7 @@ async function sendOfferEmails(
   env: Env,
   db: D1Database,
 ) {
-  const origin = request.headers.get("Origin");
-  if (origin && origin !== url.origin)
+  if (!sameOriginRequest(request, url))
     return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
 
   await ensureFullSchema(db);
@@ -2243,8 +2266,7 @@ async function sendOrderEmail(
   env: Env,
   db: D1Database,
 ) {
-  const origin = request.headers.get("Origin");
-  if (origin && origin !== url.origin)
+  if (!sameOriginRequest(request, url))
     return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
   await ensureFullSchema(db);
   const offerId = Number(body.offerId);
@@ -3224,8 +3246,7 @@ async function handleDirectoryApi(
       : await request.json<Record<string, unknown>>();
 
   if (url.pathname === "/api/portal-previews" && request.method === "POST") {
-    const origin = request.headers.get("Origin");
-    if (origin && origin !== url.origin)
+    if (!sameOriginRequest(request, url))
       return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
     const customerId = Number(body.customerId);
     const employeeId = Number(body.employeeId);
@@ -3305,8 +3326,7 @@ async function handleDirectoryApi(
     return sendOrderEmail(body, request, url, env, db);
 
   if (url.pathname.startsWith("/api/email-senders")) {
-    const origin = request.headers.get("Origin");
-    if (origin && origin !== url.origin)
+    if (!sameOriginRequest(request, url))
       return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
     try {
       if (url.pathname === "/api/email-senders" && request.method === "POST") {
@@ -3459,8 +3479,7 @@ async function handleDirectoryApi(
   }
 
   if (employeeLoginMailMatch && request.method === "POST") {
-    const origin = request.headers.get("Origin");
-    if (origin && origin !== url.origin)
+    if (!sameOriginRequest(request, url))
       return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
     const customerId = Number(employeeLoginMailMatch[1]);
     const employeeId = Number(employeeLoginMailMatch[2]);
