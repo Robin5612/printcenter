@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import {
+  attachGzdToArticle,
+  isOrderForSupplier,
+} from "../app/printcenter-relations.ts";
 
 async function render(pathname = "/") {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -118,5 +122,51 @@ test("keeps personal backend settings visible and removes the portal footer slog
   assert.doesNotMatch(
     source,
     /Eine URL · eine persönliche Sicht · hello@printcenter\.ch/,
+  );
+});
+
+test("binds uploaded GzD files to their article without duplicates", () => {
+  const articles = [{ id: 7, templates: [] }];
+  const first = attachGzdToArticle(articles, {
+    articleId: 7,
+    id: 101,
+    file: "druckdaten.pdf",
+    url: "/api/files/druckdaten.pdf",
+    addedAt: "17.08.2026, 10:00",
+  });
+  const duplicate = attachGzdToArticle(first, {
+    articleId: 7,
+    id: 102,
+    file: "druckdaten.pdf",
+    url: "/api/files/druckdaten.pdf",
+    addedAt: "17.08.2026, 10:01",
+  });
+
+  assert.equal(duplicate[0].templates.length, 1);
+  assert.equal(duplicate[0].templates[0].file, "druckdaten.pdf");
+});
+
+test("assigns order documents to the corresponding supplier", () => {
+  const supplier = { id: 20, name: "Druckpartner AG" };
+  assert.equal(
+    isOrderForSupplier(
+      { type: "Bestellung", supplierId: 20, supplier: "Druckpartner AG" },
+      supplier,
+    ),
+    true,
+  );
+  assert.equal(
+    isOrderForSupplier(
+      { type: "Bestellung", supplierId: 21, supplier: "Andere AG" },
+      supplier,
+    ),
+    false,
+  );
+  assert.equal(
+    isOrderForSupplier(
+      { type: "Angebot", supplierId: 20, supplier: "Druckpartner AG" },
+      supplier,
+    ),
+    false,
   );
 });

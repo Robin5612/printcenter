@@ -11,6 +11,7 @@ import {
 import Link from "next/link";
 import { createDocumentPdfDataUri, downloadDocumentPdf } from "./document-pdf";
 import { completeSupplierTier } from "./price-calculation";
+import { attachGzdToArticle, isOrderForSupplier } from "./printcenter-relations";
 
 type DocumentType =
   | "Anfrage"
@@ -506,6 +507,64 @@ const collectArticleGzdFiles = (
       );
     });
 };
+const mergeDocumentGzdsIntoArticles = (
+  articles: Article[],
+  documents: DocumentRecord[],
+) => {
+  let linkedArticles = articles;
+  let sequence = 0;
+  const idSeed = Date.now() * 1000;
+  const attach = (
+    articleId: number | undefined,
+    file: string | undefined,
+    url: string | undefined,
+    addedAt: string,
+  ) => {
+    if (!articleId || !file) return;
+    linkedArticles = attachGzdToArticle(linkedArticles, {
+      articleId,
+      id: idSeed + sequence++,
+      file,
+      url,
+      addedAt,
+    });
+  };
+
+  documents.forEach((document) => {
+    const timestamp = documentCreatedAt(document);
+    const addedAt = timestamp
+      ? new Intl.DateTimeFormat("de-CH", {
+          dateStyle: "short",
+          timeStyle: "short",
+        }).format(new Date(timestamp))
+      : document.date;
+    if (document.items?.length) {
+      document.items.forEach((item) => {
+        attach(item.articleId, item.printFile, item.printFileUrl, addedAt);
+        attach(
+          item.articleId,
+          item.supplierGzd,
+          item.supplierGzdUrl,
+          addedAt,
+        );
+      });
+      return;
+    }
+    attach(
+      document.articleId,
+      document.printFile,
+      document.printFileUrl,
+      addedAt,
+    );
+    attach(
+      document.articleId,
+      document.supplierGzd,
+      document.supplierGzdUrl,
+      addedAt,
+    );
+  });
+  return linkedArticles;
+};
 const renderTemplate = (
   template: string,
   values: Record<string, string | number>,
@@ -915,6 +974,7 @@ export function PrintcenterApp({
     "idle" | "pending" | "authorized" | "failed"
   >(initialPortalPreviewToken ? "pending" : "idle");
   const portalPreviewStarted = useRef(false);
+  const gzdTemplateSequence = useRef(0);
   const [supplierRoute, setSupplierRoute] = useState<string | null>(
     initialRoute === "supplier" ? (initialSupplierToken ?? null) : null,
   );
@@ -1011,19 +1071,26 @@ export function PrintcenterApp({
                 ...(stored.workflowSettings ?? {}),
               },
             };
+        const linkedState = {
+          ...state,
+          articles: mergeDocumentGzdsIntoArticles(
+            state.articles,
+            state.documents,
+          ),
+        };
         if (!stored.initialized)
           await apiRequest<{ ok: boolean }>("/api/state", {
             method: "PUT",
-            body: JSON.stringify(state),
+            body: JSON.stringify(linkedState),
           });
         if (!active) return;
-        setCustomers(state.customers);
-        setSuppliers(state.suppliers);
-        setGroups(state.groups);
-        setArticles(state.articles);
-        setDocuments(state.documents);
-        setBackendUsers(state.backendUsers);
-        setWorkflowSettings(state.workflowSettings);
+        setCustomers(linkedState.customers);
+        setSuppliers(linkedState.suppliers);
+        setGroups(linkedState.groups);
+        setArticles(linkedState.articles);
+        setDocuments(linkedState.documents);
+        setBackendUsers(linkedState.backendUsers);
+        setWorkflowSettings(linkedState.workflowSettings);
         setDatabaseReady(true);
       })
       .catch(() => {
@@ -1623,6 +1690,22 @@ export function PrintcenterApp({
     }
     input.value = "";
   }
+  function bindGzdToArticle(
+    articleId: number,
+    file?: string,
+    url?: string,
+  ) {
+    if (!file) return;
+    const now = new Date();
+    const addedAt = new Intl.DateTimeFormat("de-CH", {
+      dateStyle: "short",
+      timeStyle: "short",
+    }).format(now);
+    const id = now.getTime() * 1000 + gzdTemplateSequence.current++;
+    setArticles((current) =>
+      attachGzdToArticle(current, { articleId, id, file, url, addedAt }),
+    );
+  }
   function createDocument(data: {
     type: DocumentType;
     customerId: number;
@@ -1637,6 +1720,9 @@ export function PrintcenterApp({
     );
     const article = articles.find((item) => item.id === data.articleId);
     if (!customer || !article) return;
+    const assignedSupplier = suppliers.find(
+      (supplier) => supplier.name === article.supplier,
+    );
     const unitPrice = data.type === "Anfrage" ? 0 : data.unitPrice;
     const subtotal = data.quantity * unitPrice;
     const markupPercent = data.type === "Bestellung" ? 0 : customer.markup;
@@ -1660,6 +1746,7 @@ export function PrintcenterApp({
       employeeId: employee?.id,
       employee: employee?.name ?? "Nicht zugeordnet",
       supplier: article.supplier,
+      supplierId: assignedSupplier?.id,
       projectId: id,
       articleId: article.id,
       article: article.name,
@@ -1772,6 +1859,7 @@ export function PrintcenterApp({
       printFileUrl: data.printFileUrl,
       status: "Versendet",
     };
+    bindGzdToArticle(article.id, data.printFile, data.printFileUrl);
     setDocuments((current) => [next, ...current]);
     try {
       const result = await apiRequest<{
@@ -1875,6 +1963,9 @@ export function PrintcenterApp({
       };
     });
     if (items.some((item) => !item.requestedQuantities?.length)) return;
+    items.forEach((item) =>
+      bindGzdToArticle(item.articleId, item.printFile, item.printFileUrl),
+    );
     const groupName = data.supplier.startsWith("group:")
       ? data.supplier.slice(6)
       : undefined;
@@ -2099,6 +2190,13 @@ export function PrintcenterApp({
         : data.gzd
           ? storedFileUrls.get(data.gzd)
           : undefined);
+    if (offerItems?.length) {
+      offerItems.forEach((item) =>
+        bindGzdToArticle(item.articleId, item.supplierGzd, item.supplierGzdUrl),
+      );
+    } else if (request.articleId) {
+      bindGzdToArticle(request.articleId, data.gzd, supplierGzdUrl);
+    }
     const offer: DocumentRecord = {
       ...request,
       id,
@@ -2409,6 +2507,9 @@ export function PrintcenterApp({
       (item) => item.id === data.employeeId,
     );
     if (!customer || !article) return;
+    const assignedSupplier = suppliers.find(
+      (supplier) => supplier.name === article.supplier,
+    );
     setDocuments((current) =>
       current.map((document) => {
         if (document.id !== data.id) return document;
@@ -2425,6 +2526,7 @@ export function PrintcenterApp({
           employeeId: employee?.id,
           employee: employee?.name ?? "Nicht zugeordnet",
           supplier: article.supplier,
+          supplierId: assignedSupplier?.id,
           articleId: article.id,
           article: article.name,
           quantity: data.quantity,
@@ -3083,6 +3185,7 @@ export function PrintcenterApp({
           {view === "Lieferanten" && (
             <SuppliersView
               suppliers={suppliers}
+              documents={documents}
               groups={groups}
               groupName={groupName}
               setGroupName={setGroupName}
@@ -3092,6 +3195,10 @@ export function PrintcenterApp({
               setFormMode={setSupplierForm}
               onSave={saveSupplier}
               onDelete={deleteSupplier}
+              onOpenDocument={(documentId) => {
+                setDocumentFocusId(documentId);
+                setView("Belege");
+              }}
             />
           )}
           {view === "Belege" && (
@@ -4024,6 +4131,7 @@ function CustomerForm({
 
 function SuppliersView({
   suppliers,
+  documents,
   groups,
   groupName,
   setGroupName,
@@ -4033,8 +4141,10 @@ function SuppliersView({
   setFormMode,
   onSave,
   onDelete,
+  onOpenDocument,
 }: {
   suppliers: Supplier[];
+  documents: DocumentRecord[];
   groups: string[];
   groupName: string;
   setGroupName: (value: string) => void;
@@ -4044,6 +4154,7 @@ function SuppliersView({
   setFormMode: (mode: "new" | number | null) => void;
   onSave: (event: FormEvent<HTMLFormElement>) => void | Promise<void>;
   onDelete: (supplier: Supplier) => void | Promise<void>;
+  onOpenDocument: (documentId: number) => void;
 }) {
   const editing =
     typeof formMode === "number"
@@ -4139,6 +4250,9 @@ function SuppliersView({
         <div className="supplier-accordion-list">
           {suppliers.map((supplier) => {
             const expanded = expandedSupplierId === supplier.id;
+            const supplierOrders = documents.filter((document) =>
+              isOrderForSupplier(document, supplier),
+            );
             return (
               <article
                 className={`supplier-accordion ${expanded ? "is-expanded" : ""}`}
@@ -4194,6 +4308,49 @@ function SuppliersView({
                         Lieferant löschen
                       </button>
                     </div>
+                    <section className="supplier-order-history">
+                      <div className="supplier-order-history-heading">
+                        <div>
+                          <p className="eyebrow">BESTELLBELEGE</p>
+                          <h3>{supplierOrders.length} Bestellungen</h3>
+                        </div>
+                        <small>Direkt mit diesem Lieferanten verknüpft</small>
+                      </div>
+                      {supplierOrders.length ? (
+                        <div className="supplier-order-list">
+                          {supplierOrders.map((document) => (
+                            <article key={document.id}>
+                              <div>
+                                <strong>{document.number}</strong>
+                                <small>
+                                  Projekt {document.projectId ?? document.id}
+                                </small>
+                              </div>
+                              <div>
+                                <strong>{document.customer}</strong>
+                                <small>{document.article}</small>
+                              </div>
+                              <div>
+                                <strong>{formatMoney(document.total)}</strong>
+                                <small>{document.date}</small>
+                              </div>
+                              <button
+                                className="text-button"
+                                type="button"
+                                onClick={() => onOpenDocument(document.id)}
+                              >
+                                Beleg öffnen →
+                              </button>
+                            </article>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="supplier-order-empty">
+                          Für diesen Lieferanten sind noch keine Bestellbelege
+                          vorhanden.
+                        </p>
+                      )}
+                    </section>
                   </div>
                 )}
               </article>
