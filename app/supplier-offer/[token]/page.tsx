@@ -1,5 +1,10 @@
-import Home from "../../page";
+import { PrintcenterApp } from "../../page";
 
-export default function SupplierOfferRoute() {
-  return <Home />;
+export default async function SupplierOfferRoute({
+  params,
+}: {
+  params: Promise<{ token: string }>;
+}) {
+  const { token } = await params;
+  return <PrintcenterApp initialRoute="supplier" initialSupplierToken={token} />;
 }

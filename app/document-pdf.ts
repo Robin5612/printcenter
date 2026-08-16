@@ -32,6 +32,25 @@ export type PdfDocumentRecord = {
     unitPrice: number;
     supplierTotal?: number;
   }>;
+  items?: Array<{
+    articleId: number;
+    sku: string;
+    article: string;
+    quantity: number;
+    requestedQuantities?: number[];
+    unitPrice: number;
+    subtotal: number;
+    markupAmount: number;
+    total: number;
+    printFile?: string;
+    supplierGzd?: string;
+    gzdStatus?: "Freigegeben" | "In Prüfung" | "Abgelehnt";
+    offerOptions?: Array<{
+      quantity: number;
+      unitPrice: number;
+      supplierTotal?: number;
+    }>;
+  }>;
 };
 
 const red = rgb(203 / 255, 0, 61 / 255);
@@ -86,7 +105,212 @@ function drawWrapped(
   return y - lines.length * lineHeight;
 }
 
+async function createMultiItemDocumentPdf(record: PdfDocumentRecord) {
+  const pdf = await PDFDocument.create();
+  pdf.setTitle(`${record.type} ${record.number}`);
+  pdf.setAuthor("Printcenter");
+  pdf.setSubject(`Projekt ${record.projectId ?? record.number}`);
+  const regular = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const mono = await pdf.embedFont(StandardFonts.CourierBold);
+  const items = record.items ?? [];
+  const customerPriceDocument =
+    record.type === "Angebot" || record.type === "Auftragsbestätigung";
+  const pages: PDFPage[] = [];
+  let page: PDFPage;
+  let y = 0;
+  const addPage = () => {
+    page = pdf.addPage([595.28, 841.89]);
+    pages.push(page);
+    const width = page.getWidth();
+    page.drawRectangle({ x: 0, y: 771, width, height: 71, color: ink });
+    page.drawRectangle({ x: 0, y: 771, width: 16, height: 71, color: red });
+    page.drawText("PRINTCENTER", {
+      x: 44,
+      y: 807,
+      size: 11,
+      font: bold,
+      color: white,
+    });
+    page.drawText(`${safe(record.type).toUpperCase()} · SAMMELBELEG`, {
+      x: 44,
+      y: 784,
+      size: 16,
+      font: bold,
+      color: white,
+    });
+    const numberWidth = mono.widthOfTextAtSize(record.number, 11);
+    page.drawText(safe(record.number), {
+      x: width - 44 - numberWidth,
+      y: 799,
+      size: 11,
+      font: mono,
+      color: white,
+    });
+    page.drawText(`Kunde: ${safe(record.customer)}`, {
+      x: 44,
+      y: 742,
+      size: 10,
+      font: bold,
+      color: ink,
+    });
+    page.drawText(
+      `Projekt: ${safe(record.projectId ?? record.number)} · Datum: ${safe(record.date)}`,
+      { x: 44, y: 726, size: 9, font: regular, color: muted },
+    );
+    page.drawText(
+      `Lieferdatum: ${safe(record.supplierDeliveryDate || record.deliveryDate || "auf Anfrage")}`,
+      { x: 330, y: 726, size: 9, font: regular, color: muted },
+    );
+    y = 690;
+  };
+  const ensureSpace = (height: number) => {
+    if (y - height < 72) addPage();
+  };
+  addPage();
+  for (const [itemIndex, item] of items.entries()) {
+    const options =
+      record.type === "Anfrage"
+        ? (item.requestedQuantities?.length
+            ? item.requestedQuantities
+            : [item.quantity]
+          ).map((quantity) => ({ quantity, unitPrice: 0, supplierTotal: 0 }))
+        : item.offerOptions?.length
+          ? item.offerOptions
+          : [
+              {
+                quantity: item.quantity,
+                unitPrice: item.unitPrice,
+                supplierTotal: item.subtotal,
+              },
+            ];
+    const blockHeight = 68 + options.length * 22;
+    ensureSpace(blockHeight);
+    page.drawRectangle({
+      x: 44,
+      y: y - 31,
+      width: 507,
+      height: 38,
+      color: itemIndex % 2 ? sand : white,
+      borderColor: ink,
+      borderWidth: 1,
+    });
+    page.drawText(`${itemIndex + 1}. ${safe(item.article)}`, {
+      x: 56,
+      y: y - 9,
+      size: 11,
+      font: bold,
+      color: ink,
+    });
+    page.drawText(`SKU ${safe(item.sku)}`, {
+      x: 56,
+      y: y - 24,
+      size: 8,
+      font: mono,
+      color: red,
+    });
+    const gzd = item.supplierGzd || item.printFile || "Kein GzD";
+    page.drawText(`GzD: ${safe(gzd).slice(0, 36)}`, {
+      x: 330,
+      y: y - 23,
+      size: 8,
+      font: regular,
+      color: muted,
+    });
+    y -= 50;
+    for (const option of options) {
+      const supplierTotal =
+        option.supplierTotal ?? option.quantity * option.unitPrice;
+      const displayedTotal = customerPriceDocument
+        ? supplierTotal * (1 + record.markupPercent / 100)
+        : supplierTotal;
+      const displayedUnit = option.quantity
+        ? displayedTotal / option.quantity
+        : 0;
+      page.drawText(`${option.quantity} Stück`, {
+        x: 68,
+        y,
+        size: 9,
+        font: bold,
+        color: ink,
+      });
+      if (record.type === "Anfrage")
+        page.drawText("Preis wird durch den Lieferanten ergänzt", {
+          x: 230,
+          y,
+          size: 8,
+          font: regular,
+          color: muted,
+        });
+      else {
+        page.drawText(`${unitMoney(displayedUnit)} / Stück`, {
+          x: 230,
+          y,
+          size: 8,
+          font: regular,
+          color: muted,
+        });
+        page.drawText(money(displayedTotal), {
+          x: 455,
+          y,
+          size: 9,
+          font: bold,
+          color: ink,
+        });
+      }
+      y -= 22;
+    }
+    y -= 16;
+  }
+  if (record.note || record.documentText) {
+    ensureSpace(90);
+    page.drawText("BEMERKUNG", {
+      x: 44,
+      y,
+      size: 8,
+      font: bold,
+      color: red,
+    });
+    drawWrapped(
+      page,
+      record.note || record.documentText || "",
+      44,
+      y - 18,
+      507,
+      regular,
+      9,
+      ink,
+      12,
+    );
+  }
+  pages.forEach((currentPage, index) => {
+    currentPage.drawLine({
+      start: { x: 44, y: 52 },
+      end: { x: 551, y: 52 },
+      thickness: 1,
+      color: ink,
+    });
+    currentPage.drawText("PRINTCENTER - ROT. KLAR. PRODUKTIONSBEREIT.", {
+      x: 44,
+      y: 35,
+      size: 7,
+      font: bold,
+      color: ink,
+    });
+    const footer = `${safe(record.number)} - Seite ${index + 1} / ${pages.length}`;
+    currentPage.drawText(footer, {
+      x: 551 - regular.widthOfTextAtSize(footer, 7),
+      y: 35,
+      size: 7,
+      font: regular,
+      color: muted,
+    });
+  });
+  return pdf.saveAsBase64({ dataUri: true });
+}
+
 export async function createDocumentPdfDataUri(record: PdfDocumentRecord) {
+  if (record.items?.length) return createMultiItemDocumentPdf(record);
   const pdf = await PDFDocument.create();
   pdf.setTitle(`${record.type} ${record.number}`);
   pdf.setAuthor("Printcenter");

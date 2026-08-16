@@ -108,8 +108,6 @@ export const suppliers = sqliteTable(
     contactName: text("contact_name"),
     email: text("email"),
     phone: text("phone"),
-    leadTimeDays: integer("lead_time_days"),
-    leadTimeText: text("lead_time_text"),
     groupId: integer("group_id").references(() => supplierGroups.id, {
       onDelete: "set null",
     }),
@@ -126,7 +124,8 @@ export const articles = sqliteTable(
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
     sku: text("sku").notNull(),
-    name: text("name").notNull(),
+    designation1: text("designation_1").notNull(),
+    designation2: text("designation_2").notNull().default(""),
     customerId: integer("customer_id").references(() => customers.id, {
       onDelete: "set null",
     }),
@@ -140,9 +139,6 @@ export const articles = sqliteTable(
     stock: integer("stock").notNull().default(0),
     reorderPoint: integer("reorder_point").notNull().default(0),
     unitPrice: real("unit_price").notNull().default(0),
-    tierQuantitiesJson: text("tier_quantities_json")
-      .notNull()
-      .default("[100,250,500,1000,2000]"),
     stockHistoryJson: text("stock_history_json").notNull().default("[]"),
     legacyPrintFileKey: text("print_file_key"),
     createdAt: text("created_at")
@@ -388,6 +384,14 @@ export const workflowSettings = sqliteTable("workflow_settings", {
   offerTemplate: text("offer_template").notNull(),
   orderTemplate: text("order_template").notNull(),
   confirmationTemplate: text("confirmation_template").notNull(),
+  employeeLoginSubject: text("employee_login_subject")
+    .notNull()
+    .default("Ihr Zugang zum Printcenter von {company}"),
+  employeeLoginTemplate: text("employee_login_template")
+    .notNull()
+    .default(
+      "Guten Tag {salutation} {lastName},\n\nIhr persönlicher Zugang zum Kundenportal von {company} ist eingerichtet.\n\nPortal: {portalUrl}\nLogin: {email}\nPasswort: {password}\n\nBitte bewahren Sie diese Zugangsdaten sicher auf.\n\nFreundliche Grüsse\nPrintcenter",
+    ),
   supplierOfferSubject: text("supplier_offer_subject").notNull(),
   offerEmail: text("offer_email").notNull(),
   orderEmail: text("order_email").notNull(),

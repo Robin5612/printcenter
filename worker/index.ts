@@ -5,6 +5,7 @@ import {
   DEFAULT_IMAGE_SIZES,
 } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
+import { createDocumentPdfDataUri } from "../app/document-pdf";
 
 interface Env {
   ASSETS: Fetcher;
@@ -64,8 +65,6 @@ type DirectorySupplierRow = {
   contact_name: string | null;
   email: string | null;
   phone: string | null;
-  lead_time_days: number | null;
-  lead_time_text: string | null;
   group_name: string | null;
 };
 type StateEmployee = {
@@ -106,18 +105,18 @@ type StateSupplier = {
   contact: string;
   email: string;
   phone: string;
-  leadTime: string;
 };
 type StateArticle = {
   id: number;
   sku: string;
+  designation1: string;
+  designation2: string;
   name: string;
   customerId?: number;
   supplier: string;
   stock: number;
   minimum: number;
   unitPrice: number;
-  tierQuantities: number[];
   stockHistory: Array<{
     date: string;
     change: number;
@@ -125,6 +124,27 @@ type StateArticle = {
     reason: string;
   }>;
   templates: Array<{ id: number; file: string; addedAt: string; url?: string }>;
+};
+type StateDocumentItem = {
+  articleId: number;
+  sku: string;
+  article: string;
+  quantity: number;
+  requestedQuantities?: number[];
+  unitPrice: number;
+  subtotal: number;
+  markupAmount: number;
+  total: number;
+  printFile?: string;
+  printFileUrl?: string;
+  supplierGzd?: string;
+  supplierGzdUrl?: string;
+  gzdStatus?: string;
+  offerOptions?: Array<{
+    quantity: number;
+    unitPrice: number;
+    supplierTotal?: number;
+  }>;
 };
 type StateDocument = {
   id: number;
@@ -170,6 +190,7 @@ type StateDocument = {
     unitPrice: number;
     supplierTotal?: number;
   }>;
+  items?: StateDocumentItem[];
   status: string;
 };
 type StateBackendUser = {
@@ -185,6 +206,8 @@ type StateWorkflow = {
   offerTemplate: string;
   orderTemplate: string;
   confirmationTemplate: string;
+  employeeLoginSubject: string;
+  employeeLoginTemplate: string;
   supplierOfferSubject: string;
   offerEmail: string;
   orderEmail: string;
@@ -225,7 +248,7 @@ async function ensureDirectorySchema(db: D1Database) {
       "CREATE TABLE IF NOT EXISTS supplier_groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE)",
     ),
     db.prepare(
-      "CREATE TABLE IF NOT EXISTS suppliers (id INTEGER PRIMARY KEY AUTOINCREMENT, supplier_number TEXT NOT NULL UNIQUE, name TEXT NOT NULL, contact_name TEXT, email TEXT, phone TEXT, lead_time_days INTEGER, lead_time_text TEXT, group_id INTEGER REFERENCES supplier_groups(id) ON DELETE SET NULL)",
+      "CREATE TABLE IF NOT EXISTS suppliers (id INTEGER PRIMARY KEY AUTOINCREMENT, supplier_number TEXT NOT NULL UNIQUE, name TEXT NOT NULL, contact_name TEXT, email TEXT, phone TEXT, group_id INTEGER REFERENCES supplier_groups(id) ON DELETE SET NULL)",
     ),
   ]);
   await ensureColumn(db, "customers", "contact_salutation", "TEXT");
@@ -234,7 +257,6 @@ async function ensureDirectorySchema(db: D1Database) {
   await ensureColumn(db, "customer_employees", "salutation", "TEXT");
   await ensureColumn(db, "customer_employees", "first_name", "TEXT");
   await ensureColumn(db, "customer_employees", "last_name", "TEXT");
-  await ensureColumn(db, "suppliers", "lead_time_text", "TEXT");
   const marker = await db
     .prepare("SELECT value FROM app_meta WHERE key = ?")
     .bind("directory_seeded")
@@ -409,7 +431,7 @@ async function ensureDirectorySchema(db: D1Database) {
       ),
       db
         .prepare(
-          "INSERT OR IGNORE INTO suppliers (id, supplier_number, name, contact_name, email, phone, lead_time_days, group_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT OR IGNORE INTO suppliers (id, supplier_number, name, contact_name, email, phone, group_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(
           1,
@@ -418,12 +440,11 @@ async function ensureDirectorySchema(db: D1Database) {
           "Julia Keller",
           "jkeller@papierwerk-sued.de",
           "+49 761 441 63 10",
-          4,
           1,
         ),
       db
         .prepare(
-          "INSERT OR IGNORE INTO suppliers (id, supplier_number, name, contact_name, email, phone, lead_time_days, group_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT OR IGNORE INTO suppliers (id, supplier_number, name, contact_name, email, phone, group_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(
           2,
@@ -432,12 +453,11 @@ async function ensureDirectorySchema(db: D1Database) {
           "Andreas Haas",
           "a.haas@farbwerk.ch",
           "+41 71 811 24 81",
-          6,
           2,
         ),
       db
         .prepare(
-          "INSERT OR IGNORE INTO suppliers (id, supplier_number, name, contact_name, email, phone, lead_time_days, group_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT OR IGNORE INTO suppliers (id, supplier_number, name, contact_name, email, phone, group_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(
           3,
@@ -446,7 +466,6 @@ async function ensureDirectorySchema(db: D1Database) {
           "Sarah Winter",
           "s.winter@buchbinderei.ch",
           "+41 44 770 15 00",
-          3,
           3,
         ),
     ]);
@@ -475,8 +494,8 @@ async function ensureColumn(
   definition: string,
 ) {
   if (
-    !/^[a-z_]+$/.test(table) ||
-    !/^[a-z_]+$/.test(column) ||
+    !/^[a-z_][a-z0-9_]*$/.test(table) ||
+    !/^[a-z_][a-z0-9_]*$/.test(column) ||
     !/^[A-Z0-9_ '[\]().-]+$/.test(definition)
   )
     throw new Error("Invalid schema identifier");
@@ -504,7 +523,7 @@ async function readDirectory(db: D1Database) {
         .all<DirectoryEmployeeRow>(),
       db
         .prepare(
-          "SELECT s.id, s.supplier_number, s.name, s.contact_name, s.email, s.phone, s.lead_time_days, s.lead_time_text, g.name AS group_name FROM suppliers s LEFT JOIN supplier_groups g ON g.id = s.group_id ORDER BY s.name",
+          "SELECT s.id, s.supplier_number, s.name, s.contact_name, s.email, s.phone, g.name AS group_name FROM suppliers s LEFT JOIN supplier_groups g ON g.id = s.group_id ORDER BY s.name",
         )
         .all<DirectorySupplierRow>(),
       db
@@ -558,11 +577,6 @@ async function readDirectory(db: D1Database) {
       contact: supplier.contact_name ?? "",
       email: supplier.email ?? "",
       phone: supplier.phone ?? "",
-      leadTime:
-        supplier.lead_time_text ||
-        (supplier.lead_time_days
-          ? `${supplier.lead_time_days} Arbeitstage`
-          : "auf Anfrage"),
     })),
     groups: groupRows.results.map((group) => group.name),
   };
@@ -600,7 +614,7 @@ async function ensureFullSchema(db: D1Database) {
   await ensureDirectorySchema(db);
   await db.batch([
     db.prepare(
-      "CREATE TABLE IF NOT EXISTS articles (id INTEGER PRIMARY KEY AUTOINCREMENT, sku TEXT NOT NULL UNIQUE, name TEXT NOT NULL, customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL, supplier_id INTEGER REFERENCES suppliers(id) ON DELETE SET NULL, supplier_group_id INTEGER REFERENCES supplier_groups(id) ON DELETE SET NULL, stock INTEGER NOT NULL DEFAULT 0, reorder_point INTEGER NOT NULL DEFAULT 0, unit_price REAL NOT NULL DEFAULT 0, tier_quantities_json TEXT NOT NULL DEFAULT '[]', stock_history_json TEXT NOT NULL DEFAULT '[]', print_file_key TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+      "CREATE TABLE IF NOT EXISTS articles (id INTEGER PRIMARY KEY AUTOINCREMENT, sku TEXT NOT NULL UNIQUE, designation_1 TEXT NOT NULL, designation_2 TEXT NOT NULL DEFAULT '', customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL, supplier_id INTEGER REFERENCES suppliers(id) ON DELETE SET NULL, supplier_group_id INTEGER REFERENCES supplier_groups(id) ON DELETE SET NULL, stock INTEGER NOT NULL DEFAULT 0, reorder_point INTEGER NOT NULL DEFAULT 0, unit_price REAL NOT NULL DEFAULT 0, stock_history_json TEXT NOT NULL DEFAULT '[]', print_file_key TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
     ),
     db.prepare(
       "CREATE TABLE IF NOT EXISTS customer_accounts (id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1)",
@@ -630,7 +644,7 @@ async function ensureFullSchema(db: D1Database) {
       "CREATE TABLE IF NOT EXISTS backend_users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, role TEXT NOT NULL DEFAULT 'operator', password_hash TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
     ),
     db.prepare(
-      "CREATE TABLE IF NOT EXISTS workflow_settings (id INTEGER PRIMARY KEY AUTOINCREMENT, request_template TEXT NOT NULL, offer_template TEXT NOT NULL, order_template TEXT NOT NULL, confirmation_template TEXT NOT NULL, supplier_offer_subject TEXT NOT NULL, offer_email TEXT NOT NULL, order_email TEXT NOT NULL, attach_request_document INTEGER NOT NULL DEFAULT 1, attach_request_gzd INTEGER NOT NULL DEFAULT 1, attach_offer_document INTEGER NOT NULL DEFAULT 1, attach_offer_gzd INTEGER NOT NULL DEFAULT 1, attach_order_document INTEGER NOT NULL DEFAULT 1, attach_order_gzd INTEGER NOT NULL DEFAULT 1, attach_confirmation_document INTEGER NOT NULL DEFAULT 1, attach_confirmation_gzd INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+      "CREATE TABLE IF NOT EXISTS workflow_settings (id INTEGER PRIMARY KEY AUTOINCREMENT, request_template TEXT NOT NULL, offer_template TEXT NOT NULL, order_template TEXT NOT NULL, confirmation_template TEXT NOT NULL, employee_login_subject TEXT NOT NULL DEFAULT 'Ihr Zugang zum Printcenter von {company}', employee_login_template TEXT NOT NULL DEFAULT 'Guten Tag {salutation} {lastName},\\n\\nIhr persönlicher Zugang zum Kundenportal von {company} ist eingerichtet.\\n\\nPortal: {portalUrl}\\nLogin: {email}\\nPasswort: {password}\\n\\nBitte bewahren Sie diese Zugangsdaten sicher auf.\\n\\nFreundliche Grüsse\\nPrintcenter', supplier_offer_subject TEXT NOT NULL, offer_email TEXT NOT NULL, order_email TEXT NOT NULL, attach_request_document INTEGER NOT NULL DEFAULT 1, attach_request_gzd INTEGER NOT NULL DEFAULT 1, attach_offer_document INTEGER NOT NULL DEFAULT 1, attach_offer_gzd INTEGER NOT NULL DEFAULT 1, attach_order_document INTEGER NOT NULL DEFAULT 1, attach_order_gzd INTEGER NOT NULL DEFAULT 1, attach_confirmation_document INTEGER NOT NULL DEFAULT 1, attach_confirmation_gzd INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
     ),
     db.prepare(
       "CREATE TABLE IF NOT EXISTS integration_settings (id INTEGER PRIMARY KEY, navision_endpoint TEXT NOT NULL DEFAULT '', navision_tenant TEXT NOT NULL DEFAULT '', api_base_url TEXT NOT NULL DEFAULT '', api_client_id TEXT NOT NULL DEFAULT '', ftp_protocol TEXT NOT NULL DEFAULT 'SFTP', ftp_host TEXT NOT NULL DEFAULT '', ftp_port TEXT NOT NULL DEFAULT '22', ftp_username TEXT NOT NULL DEFAULT '', ftp_directory TEXT NOT NULL DEFAULT '/printcenter', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
@@ -696,6 +710,42 @@ async function ensureFullSchema(db: D1Database) {
   ];
   for (const [column, definition] of documentColumns)
     await ensureColumn(db, "documents", column, definition);
+  const articleColumns = await db
+    .prepare("PRAGMA table_info(articles)")
+    .all<{ name: string }>();
+  const hasLegacyArticleName = articleColumns.results.some(
+    (column) => column.name === "name",
+  );
+  await ensureColumn(
+    db,
+    "articles",
+    "designation_1",
+    "TEXT NOT NULL DEFAULT ''",
+  );
+  await ensureColumn(
+    db,
+    "articles",
+    "designation_2",
+    "TEXT NOT NULL DEFAULT ''",
+  );
+  if (hasLegacyArticleName)
+    await db
+      .prepare(
+        "UPDATE articles SET designation_1 = name WHERE designation_1 = ''",
+      )
+      .run();
+  await ensureColumn(
+    db,
+    "workflow_settings",
+    "employee_login_subject",
+    "TEXT",
+  );
+  await ensureColumn(
+    db,
+    "workflow_settings",
+    "employee_login_template",
+    "TEXT",
+  );
   await db.prepare("PRAGMA optimize").run();
 }
 
@@ -727,6 +777,11 @@ type EmailSenderRow = {
   created_at: string;
   updated_at: string;
 };
+type EmailAttachment = {
+  filename: string;
+  contentType: string;
+  contentBase64: string;
+};
 
 const bytesToBase64 = (bytes: Uint8Array) => {
   let binary = "";
@@ -739,6 +794,19 @@ const base64ToBytes = (value: string) => {
 };
 const utf8Base64 = (value: string) =>
   bytesToBase64(new TextEncoder().encode(value));
+const wrapBase64 = (value: string) => value.match(/.{1,76}/g)?.join("\r\n") ?? "";
+const safeMailHeader = (value: string) => value.replace(/[\r\n]+/g, " ").trim();
+const safeAttachmentName = (value: string) =>
+  value
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 120) || "datei";
+const safeContentType = (value: string) =>
+  /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i.test(value)
+    ? value
+    : "application/octet-stream";
 
 async function emailEncryptionSecret(env: Env, db: D1Database) {
   if (env.EMAIL_ENCRYPTION_KEY?.trim()) return env.EMAIL_ENCRYPTION_KEY.trim();
@@ -829,6 +897,14 @@ async function readEmailSenders(db: D1Database) {
 
 const validEmail = (value: string) =>
   /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) && !/[\r\n]/.test(value);
+const renderEmailTemplate = (
+  template: string,
+  values: Record<string, string | number>,
+) =>
+  Object.entries(values).reduce(
+    (result, [key, value]) => result.replaceAll(`{${key}}`, String(value)),
+    template,
+  );
 const validSmtpHost = (value: string) =>
   /^(?=.{1,253}$)(?!-)(?:[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?\.)*[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/i.test(
     value,
@@ -872,13 +948,24 @@ function validateEmailSenderBody(body: Record<string, unknown>) {
   };
 }
 
-async function sendSmtpTest(
+async function sendSmtpMessage(
   profile: EmailSenderRow,
   password: string,
   recipient: string,
+  subject: string,
+  body: string,
+  attachments: EmailAttachment[] = [],
 ) {
   if (!validEmail(recipient))
-    throw new Error("Bitte eine gültige Test-Empfängeradresse eingeben.");
+    throw new Error("Bitte eine gültige Empfängeradresse eingeben.");
+  const attachmentBytes = attachments.reduce(
+    (total, attachment) => total + Math.ceil((attachment.contentBase64.length * 3) / 4),
+    0,
+  );
+  if (attachments.some((attachment) => attachment.contentBase64.length > 11_200_000))
+    throw new Error("Ein E-Mail-Anhang ist grösser als 8 MB.");
+  if (attachmentBytes > 12_000_000)
+    throw new Error("Die E-Mail-Anhänge sind zusammen grösser als 12 MB.");
   const { connect } = await import("cloudflare:sockets");
   let socket = connect(
     { hostname: profile.smtp_host, port: Number(profile.smtp_port) },
@@ -956,28 +1043,52 @@ async function sendSmtpTest(
     await expect([250, 251]);
     await writeLine("DATA");
     await expect([354]);
-    const subject = "Printcenter – SMTP-Test erfolgreich";
-    const body = [
-      "Diese Testmail wurde über das Printcenter versendet.",
-      "",
-      `Absenderprofil: ${profile.label}`,
-      `SMTP-Server: ${profile.smtp_host}:${profile.smtp_port}`,
-      "",
-      "Die Verbindung und Anmeldung funktionieren.",
-    ].join("\r\n");
-    const message = [
-      `From: ${profile.from_name} <${profile.from_email}>`,
+    const commonHeaders = [
+      `From: =?UTF-8?B?${utf8Base64(safeMailHeader(profile.from_name))}?= <${profile.from_email}>`,
       `To: ${recipient}`,
       `Reply-To: ${profile.reply_to || profile.from_email}`,
-      `Subject: =?UTF-8?B?${utf8Base64(subject)}?=`,
+      `Subject: =?UTF-8?B?${utf8Base64(safeMailHeader(subject))}?=`,
       `Date: ${new Date().toUTCString()}`,
       `Message-ID: <${crypto.randomUUID()}@printcenter.local>`,
       "MIME-Version: 1.0",
-      "Content-Type: text/plain; charset=UTF-8",
-      "Content-Transfer-Encoding: base64",
-      "",
-      utf8Base64(body),
-    ].join("\r\n");
+    ];
+    let message: string;
+    if (!attachments.length) {
+      message = [
+        ...commonHeaders,
+        "Content-Type: text/plain; charset=UTF-8",
+        "Content-Transfer-Encoding: base64",
+        "",
+        wrapBase64(utf8Base64(body)),
+      ].join("\r\n");
+    } else {
+      const boundary = `----=_Printcenter_${crypto.randomUUID()}`;
+      const parts = [
+        `--${boundary}`,
+        "Content-Type: text/plain; charset=UTF-8",
+        "Content-Transfer-Encoding: base64",
+        "",
+        wrapBase64(utf8Base64(body)),
+      ];
+      for (const attachment of attachments) {
+        const filename = safeAttachmentName(attachment.filename);
+        parts.push(
+          `--${boundary}`,
+          `Content-Type: ${safeContentType(attachment.contentType)}; name="${filename}"`,
+          "Content-Transfer-Encoding: base64",
+          `Content-Disposition: attachment; filename="${filename}"`,
+          "",
+          wrapBase64(attachment.contentBase64.replace(/\s+/g, "")),
+        );
+      }
+      parts.push(`--${boundary}--`);
+      message = [
+        ...commonHeaders,
+        `Content-Type: multipart/mixed; boundary="${boundary}"`,
+        "",
+        ...parts,
+      ].join("\r\n");
+    }
     await writer.write(encoder.encode(`${message.replace(/^\./gm, "..")}\r\n.\r\n`));
     await expect([250]);
     await writeLine("QUIT");
@@ -987,6 +1098,1338 @@ async function sendSmtpTest(
     writer.releaseLock();
     await socket.close().catch(() => undefined);
   }
+}
+
+async function sendSmtpTest(
+  profile: EmailSenderRow,
+  password: string,
+  recipient: string,
+) {
+  return sendSmtpMessage(
+    profile,
+    password,
+    recipient,
+    "Printcenter – SMTP-Test erfolgreich",
+    [
+      "Diese Testmail wurde über das Printcenter versendet.",
+      "",
+      `Absenderprofil: ${profile.label}`,
+      `SMTP-Server: ${profile.smtp_host}:${profile.smtp_port}`,
+      "",
+      "Die Verbindung und Anmeldung funktionieren.",
+    ].join("\r\n"),
+  );
+}
+
+async function sendRequestEmails(
+  body: Record<string, unknown>,
+  request: Request,
+  url: URL,
+  env: Env,
+  db: D1Database,
+) {
+  const origin = request.headers.get("Origin");
+  if (origin && origin !== url.origin)
+    return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
+
+  await ensureFullSchema(db);
+  const customerId = Number(body.customerId);
+  const employeeId = Number(body.employeeId);
+  const articleId = Number(body.articleId);
+  const projectId = Number(body.projectId);
+  const requestNumber = safeMailHeader(String(body.number || ""));
+  const supplierToken = safeMailHeader(String(body.supplierToken || ""));
+  const deliveryDate = String(body.deliveryDate || "").trim();
+  const note = String(body.note || "").trim().slice(0, 5000);
+  const quantities = (Array.isArray(body.quantities) ? body.quantities : [])
+    .map(Number)
+    .filter((quantity) => Number.isInteger(quantity) && quantity > 0)
+    .slice(0, 5);
+  if (
+    !Number.isInteger(customerId) ||
+    !Number.isInteger(employeeId) ||
+    !Number.isInteger(articleId) ||
+    !Number.isInteger(projectId) ||
+    projectId <= 0 ||
+    !/^AF-\d{4}-\d{3,}$/.test(requestNumber) ||
+    !/^SUP-\d{6,}$/.test(supplierToken) ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(deliveryDate) ||
+    !quantities.length
+  )
+    return json(
+      { error: "Die Anfragedaten für den Mailversand sind unvollständig." },
+      { status: 400 },
+    );
+
+  const requestRow = await db
+    .prepare(
+      "SELECT a.id AS article_id, a.sku, a.designation_1, a.designation_2, a.supplier_id, a.supplier_group_id, c.id AS customer_id, c.name AS customer_name, c.markup_percent, e.id AS employee_id, e.name AS employee_name, s.name AS supplier_name, g.name AS group_name FROM articles a JOIN customers c ON c.id = a.customer_id JOIN customer_employees e ON e.id = ? AND e.customer_id = c.id AND e.active = 1 LEFT JOIN suppliers s ON s.id = a.supplier_id LEFT JOIN supplier_groups g ON g.id = a.supplier_group_id WHERE a.id = ? AND c.id = ?",
+    )
+    .bind(employeeId, articleId, customerId)
+    .first<Record<string, string | number | null>>();
+  if (!requestRow)
+    return json(
+      { error: "Kunde, Mitarbeiter oder Artikel konnte nicht verifiziert werden." },
+      { status: 404 },
+    );
+
+  let recipientRows: Array<Record<string, string | number | null>> = [];
+  let targetLabel = "Lieferant";
+  if (requestRow.supplier_id != null) {
+    const supplier = await db
+      .prepare("SELECT id, name, email FROM suppliers WHERE id = ?")
+      .bind(Number(requestRow.supplier_id))
+      .first<Record<string, string | number | null>>();
+    if (supplier) {
+      recipientRows = [supplier];
+      targetLabel = String(supplier.name);
+    }
+  } else if (requestRow.supplier_group_id != null) {
+    const suppliers = await db
+      .prepare(
+        "SELECT id, name, email FROM suppliers WHERE group_id = ? ORDER BY name COLLATE NOCASE",
+      )
+      .bind(Number(requestRow.supplier_group_id))
+      .all<Record<string, string | number | null>>();
+    recipientRows = suppliers.results;
+    targetLabel = `Lieferantengruppe · ${String(requestRow.group_name || "")}`;
+  }
+  const recipients = Array.from(
+    new Set(
+      recipientRows
+        .map((row) => String(row.email || "").trim().toLowerCase())
+        .filter(validEmail),
+    ),
+  );
+  if (!recipients.length)
+    return json(
+      {
+        error:
+          "Beim hinterlegten Lieferanten ist keine gültige E-Mail-Adresse vorhanden.",
+      },
+      { status: 400 },
+    );
+
+  const sender = await db
+    .prepare(
+      "SELECT * FROM email_sender_profiles WHERE active = 1 ORDER BY is_default DESC, id LIMIT 1",
+    )
+    .first<EmailSenderRow>();
+  if (!sender?.password_ciphertext)
+    return json(
+      {
+        error:
+          "Bitte zuerst unter E-Mail-Einstellungen einen aktiven SMTP-Absender einrichten.",
+      },
+      { status: 400 },
+    );
+  const workflow = await db
+    .prepare(
+      "SELECT request_template, supplier_offer_subject, attach_request_document, attach_request_gzd FROM workflow_settings ORDER BY id LIMIT 1",
+    )
+    .first<Record<string, string | number | null>>();
+  if (!workflow)
+    return json(
+      { error: "Die Anfragevorlage wurde nicht gefunden." },
+      { status: 500 },
+    );
+
+  const article = [
+    String(requestRow.designation_1 || ""),
+    String(requestRow.designation_2 || ""),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const quantitiesText = quantities
+    .map((quantity) => `${quantity} Stück`)
+    .join(", ");
+  const supplierLink = `${url.origin}/supplier-offer/${encodeURIComponent(supplierToken)}`;
+  const values = {
+    supplier: targetLabel,
+    customer: String(requestRow.customer_name),
+    article,
+    quantity: quantitiesText,
+    quantities: quantitiesText,
+    deliveryDate,
+    note: note || "Keine Bemerkung",
+    project: projectId,
+    requestNumber,
+    supplierLink,
+  };
+  const requestText = renderEmailTemplate(
+    String(workflow.request_template || "").replaceAll("\\n", "\n"),
+    values,
+  );
+  const actionText = [
+    "Anfrage online beantworten:",
+    supplierLink,
+    `Anfragenummer: ${requestNumber}`,
+  ].join("\n");
+  const messageBody = requestText.includes(supplierLink)
+    ? `${requestText}\n\nAnfragenummer: ${requestNumber}`
+    : `${requestText}\n\n${actionText}`;
+  const subject = renderEmailTemplate(
+    String(workflow.supplier_offer_subject || "Neue Anfrage {project}"),
+    values,
+  );
+
+  const attachments: EmailAttachment[] = [];
+  const warnings: string[] = [];
+  if (Number(workflow.attach_request_document)) {
+    const pdfDataUri = await createDocumentPdfDataUri({
+      number: requestNumber,
+      type: "Anfrage",
+      status: "Versendet",
+      date: new Intl.DateTimeFormat("de-CH").format(new Date()),
+      customer: String(requestRow.customer_name),
+      employee: String(requestRow.employee_name),
+      supplier: targetLabel,
+      projectId,
+      article,
+      quantity: quantities[0],
+      requestedQuantities: quantities,
+      unitPrice: 0,
+      subtotal: 0,
+      markupPercent: Number(requestRow.markup_percent || 0),
+      markupAmount: 0,
+      total: 0,
+      deliveryDate,
+      note,
+      documentText: requestText,
+      printFile: String(body.printFile || "") || undefined,
+    });
+    const pdfBase64 = pdfDataUri.slice(pdfDataUri.indexOf(",") + 1);
+    attachments.push({
+      filename: `${requestNumber}.pdf`,
+      contentType: "application/pdf",
+      contentBase64: pdfBase64,
+    });
+  }
+  if (Number(workflow.attach_request_gzd) && body.printFileUrl) {
+    try {
+      const fileUrl = new URL(String(body.printFileUrl), url.origin);
+      if (
+        fileUrl.origin !== url.origin ||
+        !fileUrl.pathname.startsWith("/api/files/")
+      )
+        throw new Error("ungültiger Dateipfad");
+      const key = decodeURIComponent(fileUrl.pathname.slice("/api/files/".length));
+      const object = await env.FILES.get(key);
+      if (!object) throw new Error("Datei nicht gefunden");
+      if (object.size > 8_000_000) throw new Error("Datei ist grösser als 8 MB");
+      attachments.push({
+        filename: String(body.printFile || "gut-zum-druck"),
+        contentType: object.httpMetadata?.contentType || "application/octet-stream",
+        contentBase64: bytesToBase64(
+          new Uint8Array(await object.arrayBuffer()),
+        ),
+      });
+    } catch (error) {
+      warnings.push(
+        `Das GzD konnte nicht angehängt werden (${error instanceof Error ? error.message : "unbekannter Fehler"}).`,
+      );
+    }
+  }
+
+  const password = await decryptEmailPassword(
+    env,
+    db,
+    sender.password_ciphertext,
+  );
+  const results = await Promise.allSettled(
+    recipients.map((recipient) =>
+      sendSmtpMessage(
+        sender,
+        password,
+        recipient,
+        subject,
+        messageBody,
+        attachments,
+      ),
+    ),
+  );
+  const sent = results.filter((result) => result.status === "fulfilled").length;
+  const failed = results.length - sent;
+  if (!sent) {
+    const firstFailure = results.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    return json(
+      {
+        error:
+          firstFailure?.reason instanceof Error
+            ? firstFailure.reason.message
+            : "Die Lieferantenmail konnte nicht versendet werden.",
+      },
+      { status: 502 },
+    );
+  }
+  return json({
+    ok: true,
+    sent,
+    failed,
+    attachmentCount: attachments.length,
+    warning: warnings.join(" "),
+    message:
+      failed > 0
+        ? `${sent} Lieferantenmail(s) versendet, ${failed} fehlgeschlagen.`
+        : `${sent} Lieferantenmail(s) erfolgreich versendet.`,
+  });
+}
+
+async function mailAttachmentFromStoredFile(
+  env: Env,
+  origin: string,
+  fileUrl: string,
+  filename: string,
+) {
+  const parsedUrl = new URL(fileUrl, origin);
+  if (
+    parsedUrl.origin !== origin ||
+    !parsedUrl.pathname.startsWith("/api/files/")
+  )
+    throw new Error("ungültiger Dateipfad");
+  const key = decodeURIComponent(parsedUrl.pathname.slice("/api/files/".length));
+  const object = await env.FILES.get(key);
+  if (!object) throw new Error("Datei nicht gefunden");
+  if (object.size > 8_000_000) throw new Error("Datei ist grösser als 8 MB");
+  return {
+    filename,
+    contentType: object.httpMetadata?.contentType || "application/octet-stream",
+    contentBase64: bytesToBase64(new Uint8Array(await object.arrayBuffer())),
+  } satisfies EmailAttachment;
+}
+
+async function sendCollectiveRequestEmails(
+  body: Record<string, unknown>,
+  request: Request,
+  url: URL,
+  env: Env,
+  db: D1Database,
+) {
+  const origin = request.headers.get("Origin");
+  if (origin && origin !== url.origin)
+    return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
+  await ensureFullSchema(db);
+  const customerId = Number(body.customerId);
+  const employeeId = Number(body.employeeId);
+  const projectId = Number(body.projectId);
+  const requestNumber = safeMailHeader(String(body.number || ""));
+  const supplierToken = safeMailHeader(String(body.supplierToken || ""));
+  const deliveryDate = String(body.deliveryDate || "").trim();
+  const note = String(body.note || "").trim().slice(0, 5000);
+  const rawItems = Array.isArray(body.items) ? body.items : [];
+  const items = rawItems.slice(0, 30).map((rawItem) => {
+    const item = rawItem as Record<string, unknown>;
+    return {
+      articleId: Number(item.articleId),
+      quantities: (Array.isArray(item.quantities) ? item.quantities : [])
+        .map(Number)
+        .filter((quantity) => Number.isInteger(quantity) && quantity > 0)
+        .slice(0, 5),
+      printFile: String(item.printFile || "").trim().slice(0, 240),
+      printFileUrl: String(item.printFileUrl || "").trim(),
+    };
+  });
+  if (
+    !Number.isInteger(customerId) ||
+    !Number.isInteger(employeeId) ||
+    !Number.isInteger(projectId) ||
+    projectId <= 0 ||
+    !/^AF-\d{4}-\d{3,}$/.test(requestNumber) ||
+    !/^SUP-\d{6,}$/.test(supplierToken) ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(deliveryDate) ||
+    !items.length ||
+    items.length !== rawItems.length ||
+    items.some(
+      (item) =>
+        !Number.isInteger(item.articleId) ||
+        item.articleId <= 0 ||
+        !item.quantities.length,
+    ) ||
+    new Set(items.map((item) => item.articleId)).size !== items.length
+  )
+    return json(
+      { error: "Die Sammelanfrage ist unvollständig oder ungültig." },
+      { status: 400 },
+    );
+  const employee = await db
+    .prepare(
+      "SELECT e.name, c.name AS customer_name, c.markup_percent FROM customer_employees e JOIN customers c ON c.id = e.customer_id WHERE e.id = ? AND e.customer_id = ? AND e.active = 1",
+    )
+    .bind(employeeId, customerId)
+    .first<Record<string, string | number | null>>();
+  if (!employee)
+    return json(
+      { error: "Der Kundenmitarbeiter konnte nicht verifiziert werden." },
+      { status: 404 },
+    );
+  const placeholders = items.map(() => "?").join(", ");
+  const articleRows = await db
+    .prepare(
+      `SELECT a.id, a.sku, a.designation_1, a.designation_2, a.supplier_id, a.supplier_group_id, s.name AS supplier_name, g.name AS group_name FROM articles a LEFT JOIN suppliers s ON s.id = a.supplier_id LEFT JOIN supplier_groups g ON g.id = a.supplier_group_id WHERE a.customer_id = ? AND a.id IN (${placeholders})`,
+    )
+    .bind(customerId, ...items.map((item) => item.articleId))
+    .all<Record<string, string | number | null>>();
+  if (articleRows.results.length !== items.length)
+    return json(
+      { error: "Mindestens ein Artikel gehört nicht zu diesem Kunden." },
+      { status: 400 },
+    );
+  const firstArticle = articleRows.results[0];
+  const sameSupplier = articleRows.results.every(
+    (row) =>
+      String(row.supplier_id ?? "") ===
+        String(firstArticle.supplier_id ?? "") &&
+      String(row.supplier_group_id ?? "") ===
+        String(firstArticle.supplier_group_id ?? ""),
+  );
+  if (
+    !sameSupplier ||
+    (firstArticle.supplier_id == null && firstArticle.supplier_group_id == null)
+  )
+    return json(
+      {
+        error:
+          "Alle Artikel einer Sammelanfrage müssen denselben Lieferanten haben.",
+      },
+      { status: 400 },
+    );
+  let recipientRows: Array<Record<string, string | number | null>> = [];
+  let targetLabel = "Lieferant";
+  if (firstArticle.supplier_id != null) {
+    const supplier = await db
+      .prepare("SELECT id, name, email FROM suppliers WHERE id = ?")
+      .bind(Number(firstArticle.supplier_id))
+      .first<Record<string, string | number | null>>();
+    if (supplier) {
+      recipientRows = [supplier];
+      targetLabel = String(supplier.name);
+    }
+  } else {
+    const suppliers = await db
+      .prepare(
+        "SELECT id, name, email FROM suppliers WHERE group_id = ? ORDER BY name COLLATE NOCASE",
+      )
+      .bind(Number(firstArticle.supplier_group_id))
+      .all<Record<string, string | number | null>>();
+    recipientRows = suppliers.results;
+    targetLabel = `Lieferantengruppe · ${String(firstArticle.group_name || "")}`;
+  }
+  const recipients = Array.from(
+    new Set(
+      recipientRows
+        .map((row) => String(row.email || "").trim().toLowerCase())
+        .filter(validEmail),
+    ),
+  );
+  if (!recipients.length)
+    return json(
+      { error: "Beim Lieferanten ist keine gültige E-Mail-Adresse vorhanden." },
+      { status: 400 },
+    );
+  const sender = await db
+    .prepare(
+      "SELECT * FROM email_sender_profiles WHERE active = 1 ORDER BY is_default DESC, id LIMIT 1",
+    )
+    .first<EmailSenderRow>();
+  if (!sender?.password_ciphertext)
+    return json(
+      {
+        error:
+          "Bitte zuerst unter E-Mail-Einstellungen einen aktiven SMTP-Absender einrichten.",
+      },
+      { status: 400 },
+    );
+  const workflow = await db
+    .prepare(
+      "SELECT request_template, supplier_offer_subject, attach_request_document, attach_request_gzd FROM workflow_settings ORDER BY id LIMIT 1",
+    )
+    .first<Record<string, string | number | null>>();
+  if (!workflow)
+    return json({ error: "Die Anfragevorlage fehlt." }, { status: 500 });
+  const rowsById = new Map(
+    articleRows.results.map((row) => [Number(row.id), row]),
+  );
+  const pdfItems: StateDocumentItem[] = items.map((item) => {
+    const row = rowsById.get(item.articleId)!;
+    return {
+      articleId: item.articleId,
+      sku: String(row.sku),
+      article: [String(row.designation_1 || ""), String(row.designation_2 || "")]
+        .filter(Boolean)
+        .join(" · "),
+      quantity: item.quantities[0],
+      requestedQuantities: item.quantities,
+      unitPrice: 0,
+      subtotal: 0,
+      markupAmount: 0,
+      total: 0,
+      printFile: item.printFile || undefined,
+      printFileUrl: item.printFileUrl || undefined,
+    };
+  });
+  const supplierLink = `${url.origin}/supplier-offer/${encodeURIComponent(supplierToken)}`;
+  const values = {
+    supplier: targetLabel,
+    customer: String(employee.customer_name),
+    article: `Sammelanfrage mit ${pdfItems.length} Artikeln`,
+    quantity: `${pdfItems.length} Artikel`,
+    quantities: "individuelle Staffelgrössen pro Artikel",
+    deliveryDate,
+    note: note || "Keine Bemerkung",
+    project: projectId,
+    requestNumber,
+    supplierLink,
+  };
+  const requestText = renderEmailTemplate(
+    String(workflow.request_template || "").replaceAll("\\n", "\n"),
+    values,
+  );
+  const messageBody = `${requestText}\n\nSammelanfrage online beantworten:\n${supplierLink}\nAnfragenummer: ${requestNumber}`;
+  const subject = renderEmailTemplate(
+    String(workflow.supplier_offer_subject || "Neue Anfrage {project}"),
+    values,
+  );
+  const attachments: EmailAttachment[] = [];
+  const warnings: string[] = [];
+  if (Number(workflow.attach_request_document)) {
+    const pdfDataUri = await createDocumentPdfDataUri({
+      number: requestNumber,
+      type: "Anfrage",
+      status: "Versendet",
+      date: new Intl.DateTimeFormat("de-CH").format(new Date()),
+      customer: String(employee.customer_name),
+      employee: String(employee.name),
+      supplier: targetLabel,
+      projectId,
+      article: `Sammelanfrage · ${pdfItems.length} Artikel`,
+      quantity: pdfItems[0].quantity,
+      unitPrice: 0,
+      subtotal: 0,
+      markupPercent: Number(employee.markup_percent || 0),
+      markupAmount: 0,
+      total: 0,
+      deliveryDate,
+      note,
+      documentText: requestText,
+      items: pdfItems,
+    });
+    attachments.push({
+      filename: `${requestNumber}.pdf`,
+      contentType: "application/pdf",
+      contentBase64: pdfDataUri.slice(pdfDataUri.indexOf(",") + 1),
+    });
+  }
+  if (Number(workflow.attach_request_gzd)) {
+    let attachedBytes = 0;
+    for (const item of pdfItems) {
+      if (!item.printFile || !item.printFileUrl) continue;
+      try {
+        const attachment = await mailAttachmentFromStoredFile(
+          env,
+          url.origin,
+          item.printFileUrl,
+          `${item.sku}-${item.printFile}`,
+        );
+        const estimatedBytes = Math.ceil(
+          (attachment.contentBase64.length * 3) / 4,
+        );
+        if (attachedBytes + estimatedBytes > 9_000_000) {
+          warnings.push("Weitere GzDs wurden wegen der E-Mail-Grösse ausgelassen.");
+          break;
+        }
+        attachments.push(attachment);
+        attachedBytes += estimatedBytes;
+      } catch (error) {
+        warnings.push(
+          `${item.sku}: GzD nicht angehängt (${error instanceof Error ? error.message : "Fehler"}).`,
+        );
+      }
+    }
+  }
+  const password = await decryptEmailPassword(
+    env,
+    db,
+    sender.password_ciphertext,
+  );
+  const results = await Promise.allSettled(
+    recipients.map((recipient) =>
+      sendSmtpMessage(
+        sender,
+        password,
+        recipient,
+        subject,
+        messageBody,
+        attachments,
+      ),
+    ),
+  );
+  const sent = results.filter((result) => result.status === "fulfilled").length;
+  const failed = results.length - sent;
+  if (!sent)
+    return json(
+      { error: "Die Sammelanfrage-Mail konnte nicht versendet werden." },
+      { status: 502 },
+    );
+  return json({
+    ok: true,
+    sent,
+    failed,
+    warning: warnings.join(" "),
+    message: `${sent} Lieferantenmail(s) erfolgreich versendet.`,
+  });
+}
+
+async function sendCollectiveOfferEmails(
+  body: Record<string, unknown>,
+  request: Request,
+  url: URL,
+  env: Env,
+  db: D1Database,
+) {
+  const origin = request.headers.get("Origin");
+  if (origin && origin !== url.origin)
+    return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
+  await ensureFullSchema(db);
+  const requestId = Number(body.requestId);
+  const supplierToken = safeMailHeader(String(body.supplierToken || ""));
+  const offerNumber = safeMailHeader(String(body.offerNumber || ""));
+  const deliveryDate = String(body.deliveryDate || "").trim();
+  const deliveryNote = String(body.deliveryNote || "").trim().slice(0, 3000);
+  const supplierNote = String(body.note || "").trim().slice(0, 5000);
+  const rawItems = Array.isArray(body.items) ? body.items : [];
+  const submittedItems = rawItems.map((rawItem) => {
+    const item = rawItem as Record<string, unknown>;
+    const rawOptions = Array.isArray(item.options) ? item.options : [];
+    return {
+      articleId: Number(item.articleId),
+      gzd: String(item.gzd || "").trim().slice(0, 240),
+      gzdUrl: String(item.gzdUrl || "").trim(),
+      options: rawOptions.map((rawOption) => {
+        const option = rawOption as Record<string, unknown>;
+        return {
+          quantity: Number(option.quantity),
+          unitPrice: Number(option.unitPrice),
+          supplierTotal: Number(option.supplierTotal),
+        };
+      }),
+    };
+  });
+  if (
+    !Number.isInteger(requestId) ||
+    requestId <= 0 ||
+    !/^SUP-\d{6,}$/.test(supplierToken) ||
+    !/^AN-\d{4}-\d{3,}$/.test(offerNumber) ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(deliveryDate) ||
+    !submittedItems.length ||
+    submittedItems.some(
+      (item) =>
+        !Number.isInteger(item.articleId) ||
+        !item.options.length ||
+        item.options.length > 5 ||
+        item.options.some(
+          (option) =>
+            !Number.isInteger(option.quantity) ||
+            option.quantity <= 0 ||
+            !Number.isFinite(option.unitPrice) ||
+            option.unitPrice <= 0 ||
+            !Number.isFinite(option.supplierTotal) ||
+            option.supplierTotal <= 0 ||
+            Math.abs(option.unitPrice * option.quantity - option.supplierTotal) >
+              Math.max(0.02, option.supplierTotal * 0.0001),
+        ),
+    )
+  )
+    return json(
+      { error: "Die Sammelofferte ist unvollständig oder ungültig." },
+      { status: 400 },
+    );
+  const requestRow = await db
+    .prepare(
+      "SELECT d.id, d.project_id, d.payload, c.name AS customer_name, c.customer_number, c.email AS customer_email, c.markup_percent, e.name AS employee_name, e.email AS employee_email, e.mail_to_main FROM documents d JOIN customers c ON c.id = d.customer_id JOIN customer_employees e ON e.id = d.customer_employee_id AND e.customer_id = c.id AND e.active = 1 WHERE d.id = ? AND d.type = 'Anfrage' AND d.status = 'Versendet' AND d.supplier_token = ? LIMIT 1",
+    )
+    .bind(requestId, supplierToken)
+    .first<Record<string, string | number | null>>();
+  if (!requestRow)
+    return json(
+      { error: "Der einmalige Lieferantenlink ist nicht mehr gültig." },
+      { status: 404 },
+    );
+  const requestPayload = parseJson<StateDocument>(
+    String(requestRow.payload || "{}"),
+    {} as StateDocument,
+  );
+  if (!requestPayload.items?.length)
+    return json(
+      { error: "Die Artikel der Sammelanfrage wurden nicht gefunden." },
+      { status: 400 },
+    );
+  if (
+    requestPayload.items.length !== submittedItems.length ||
+    requestPayload.items.some((requestItem) => {
+      const submitted = submittedItems.find(
+        (item) => item.articleId === requestItem.articleId,
+      );
+      const expected = (requestItem.requestedQuantities ?? [requestItem.quantity])
+        .slice()
+        .sort((left, right) => left - right);
+      const offered = (submitted?.options ?? [])
+        .map((option) => option.quantity)
+        .sort((left, right) => left - right);
+      return (
+        !submitted ||
+        expected.length !== offered.length ||
+        expected.some((quantity, index) => quantity !== offered[index])
+      );
+    })
+  )
+    return json(
+      {
+        error:
+          "Artikel oder Staffelgrössen stimmen nicht mit der Sammelanfrage überein.",
+      },
+      { status: 400 },
+    );
+  const recipients = Array.from(
+    new Set(
+      [
+        String(requestRow.employee_email || "").trim().toLowerCase(),
+        Number(requestRow.mail_to_main)
+          ? String(requestRow.customer_email || "").trim().toLowerCase()
+          : "",
+      ].filter(validEmail),
+    ),
+  );
+  if (!recipients.length)
+    return json(
+      { error: "Beim Kunden ist keine gültige E-Mail-Adresse vorhanden." },
+      { status: 400 },
+    );
+  const sender = await db
+    .prepare(
+      "SELECT * FROM email_sender_profiles WHERE active = 1 ORDER BY is_default DESC, id LIMIT 1",
+    )
+    .first<EmailSenderRow>();
+  if (!sender?.password_ciphertext)
+    return json(
+      { error: "Es ist kein aktiver SMTP-Absender eingerichtet." },
+      { status: 400 },
+    );
+  const workflow = await db
+    .prepare(
+      "SELECT offer_template, attach_offer_document, attach_offer_gzd FROM workflow_settings ORDER BY id LIMIT 1",
+    )
+    .first<Record<string, string | number | null>>();
+  if (!workflow)
+    return json({ error: "Die Angebotsvorlage fehlt." }, { status: 500 });
+  const markupPercent = Number(requestRow.markup_percent || 0);
+  const offerItems: StateDocumentItem[] = requestPayload.items.map(
+    (requestItem) => {
+      const submitted = submittedItems.find(
+        (item) => item.articleId === requestItem.articleId,
+      )!;
+      const firstOption = submitted.options[0];
+      const subtotal = firstOption.supplierTotal;
+      const markupAmount = (subtotal * markupPercent) / 100;
+      return {
+        ...requestItem,
+        quantity: firstOption.quantity,
+        unitPrice: firstOption.unitPrice,
+        subtotal,
+        markupAmount,
+        total: subtotal + markupAmount,
+        supplierGzd: submitted.gzd || undefined,
+        supplierGzdUrl:
+          submitted.gzd === requestItem.printFile
+            ? requestItem.printFileUrl
+            : submitted.gzdUrl || undefined,
+        gzdStatus: submitted.gzd ? "In Prüfung" : undefined,
+        offerOptions: submitted.options,
+      };
+    },
+  );
+  const subtotal = offerItems.reduce((sum, item) => sum + item.subtotal, 0);
+  const markupAmount = (subtotal * markupPercent) / 100;
+  const total = subtotal + markupAmount;
+  const projectId = Number(requestRow.project_id || requestPayload.projectId || requestId);
+  const portalUrl = `${url.origin}/${encodeURIComponent(String(requestRow.customer_number))}`;
+  const values = {
+    supplier: requestPayload.supplier || "Lieferant",
+    customer: String(requestRow.customer_name),
+    article: `Sammelofferte mit ${offerItems.length} Artikeln`,
+    quantity: `${offerItems.length} Artikel`,
+    quantities: "individuelle Staffelgrössen pro Artikel",
+    deliveryDate,
+    note: deliveryNote || supplierNote || "Keine Bemerkung",
+    project: projectId,
+    total: total.toFixed(2),
+    offerNumber,
+    portalUrl,
+  };
+  const offerText = renderEmailTemplate(
+    String(workflow.offer_template || "").replaceAll("\\n", "\n"),
+    values,
+  );
+  const messageBody = `${offerText}\n\nSammelofferte im Kundenportal öffnen:\n${portalUrl}\nAngebotsnummer: ${offerNumber}`;
+  const attachments: EmailAttachment[] = [];
+  const warnings: string[] = [];
+  if (Number(workflow.attach_offer_document)) {
+    const pdfDataUri = await createDocumentPdfDataUri({
+      number: offerNumber,
+      type: "Angebot",
+      status: "Offen",
+      date: new Intl.DateTimeFormat("de-CH").format(new Date()),
+      customer: String(requestRow.customer_name),
+      employee: String(requestRow.employee_name),
+      supplier: requestPayload.supplier,
+      projectId,
+      article: `Sammelofferte · ${offerItems.length} Artikel`,
+      quantity: offerItems[0].quantity,
+      unitPrice: offerItems[0].unitPrice,
+      subtotal,
+      markupPercent,
+      markupAmount,
+      total,
+      deliveryDate: requestPayload.deliveryDate,
+      supplierDeliveryDate: deliveryDate,
+      supplierDeliveryNote: deliveryNote || undefined,
+      note: supplierNote,
+      documentText: offerText,
+      items: offerItems,
+    });
+    attachments.push({
+      filename: `${offerNumber}.pdf`,
+      contentType: "application/pdf",
+      contentBase64: pdfDataUri.slice(pdfDataUri.indexOf(",") + 1),
+    });
+  }
+  if (Number(workflow.attach_offer_gzd)) {
+    let attachedBytes = 0;
+    for (const item of offerItems) {
+      if (!item.supplierGzd || !item.supplierGzdUrl) continue;
+      try {
+        const attachment = await mailAttachmentFromStoredFile(
+          env,
+          url.origin,
+          item.supplierGzdUrl,
+          `${item.sku}-${item.supplierGzd}`,
+        );
+        const estimatedBytes = Math.ceil(
+          (attachment.contentBase64.length * 3) / 4,
+        );
+        if (attachedBytes + estimatedBytes > 9_000_000) {
+          warnings.push("Weitere GzDs wurden wegen der E-Mail-Grösse ausgelassen.");
+          break;
+        }
+        attachments.push(attachment);
+        attachedBytes += estimatedBytes;
+      } catch (error) {
+        warnings.push(
+          `${item.sku}: GzD nicht angehängt (${error instanceof Error ? error.message : "Fehler"}).`,
+        );
+      }
+    }
+  }
+  const password = await decryptEmailPassword(
+    env,
+    db,
+    sender.password_ciphertext,
+  );
+  const results = await Promise.allSettled(
+    recipients.map((recipient) =>
+      sendSmtpMessage(
+        sender,
+        password,
+        recipient,
+        `Ihre Sammelofferte ${offerNumber}`,
+        messageBody,
+        attachments,
+      ),
+    ),
+  );
+  const sent = results.filter((result) => result.status === "fulfilled").length;
+  if (!sent)
+    return json(
+      { error: "Die Sammelofferte-Mail konnte nicht versendet werden." },
+      { status: 502 },
+    );
+  return json({
+    ok: true,
+    sent,
+    failed: results.length - sent,
+    attachmentCount: attachments.length,
+    warning: warnings.join(" "),
+    message: `${sent} Kundenmail(s) erfolgreich versendet.`,
+  });
+}
+
+async function sendOfferEmails(
+  body: Record<string, unknown>,
+  request: Request,
+  url: URL,
+  env: Env,
+  db: D1Database,
+) {
+  const origin = request.headers.get("Origin");
+  if (origin && origin !== url.origin)
+    return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
+
+  await ensureFullSchema(db);
+  const requestId = Number(body.requestId);
+  const supplierToken = safeMailHeader(String(body.supplierToken || ""));
+  const offerNumber = safeMailHeader(String(body.offerNumber || ""));
+  const deliveryDate = String(body.deliveryDate || "").trim();
+  const deliveryNote = String(body.deliveryNote || "").trim().slice(0, 3000);
+  const supplierNote = String(body.note || "").trim().slice(0, 5000);
+  const rawOptions = Array.isArray(body.options) ? body.options : [];
+  const options = rawOptions.map((option) => {
+    const row = option as Record<string, unknown>;
+    return {
+      quantity: Number(row.quantity),
+      unitPrice: Number(row.unitPrice),
+      supplierTotal: Number(row.supplierTotal),
+    };
+  });
+  if (
+    !Number.isInteger(requestId) ||
+    requestId <= 0 ||
+    !/^SUP-\d{6,}$/.test(supplierToken) ||
+    !/^AN-\d{4}-\d{3,}$/.test(offerNumber) ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(deliveryDate) ||
+    !options.length ||
+    options.length > 5 ||
+    options.some(
+      (option) =>
+        !Number.isInteger(option.quantity) ||
+        option.quantity <= 0 ||
+        !Number.isFinite(option.unitPrice) ||
+        option.unitPrice <= 0 ||
+        !Number.isFinite(option.supplierTotal) ||
+        option.supplierTotal <= 0 ||
+        Math.abs(option.unitPrice * option.quantity - option.supplierTotal) >
+          Math.max(0.02, option.supplierTotal * 0.0001),
+    )
+  )
+    return json(
+      { error: "Die Angebotsdaten für den Mailversand sind unvollständig." },
+      { status: 400 },
+    );
+
+  const requestRow = await db
+    .prepare(
+      "SELECT d.id, d.document_number, d.customer_id, d.customer_employee_id, d.project_id, d.supplier_id, d.requested_quantities_json, d.payload, c.name AS customer_name, c.customer_number, c.email AS customer_email, c.markup_percent, e.name AS employee_name, e.email AS employee_email, e.mail_to_main, a.id AS article_id, a.sku, a.designation_1, a.designation_2, s.name AS supplier_name FROM documents d JOIN customers c ON c.id = d.customer_id JOIN customer_employees e ON e.id = d.customer_employee_id AND e.customer_id = c.id AND e.active = 1 LEFT JOIN document_lines dl ON dl.document_id = d.id LEFT JOIN articles a ON a.id = dl.article_id LEFT JOIN suppliers s ON s.id = d.supplier_id WHERE d.id = ? AND d.type = 'Anfrage' AND d.status = 'Versendet' AND d.supplier_token = ? LIMIT 1",
+    )
+    .bind(requestId, supplierToken)
+    .first<Record<string, string | number | null>>();
+  if (!requestRow)
+    return json(
+      { error: "Der einmalige Lieferantenlink ist nicht mehr gültig." },
+      { status: 404 },
+    );
+  const requestPayload = parseJson<StateDocument>(
+    String(requestRow.payload || "{}"),
+    {} as StateDocument,
+  );
+  const storedRequestedQuantities = parseJson<number[]>(
+    String(requestRow.requested_quantities_json || "[]"),
+    [],
+  );
+  const expectedQuantities = (
+    storedRequestedQuantities.length
+      ? storedRequestedQuantities
+      : requestPayload.requestedQuantities?.length
+        ? requestPayload.requestedQuantities
+        : [requestPayload.quantity]
+  )
+    .filter((quantity) => Number.isInteger(quantity) && quantity > 0)
+    .sort((left, right) => left - right);
+  const offeredQuantities = options
+    .map((option) => option.quantity)
+    .sort((left, right) => left - right);
+  if (
+    expectedQuantities.length !== offeredQuantities.length ||
+    expectedQuantities.some(
+      (quantity, index) => quantity !== offeredQuantities[index],
+    )
+  )
+    return json(
+      { error: "Die angebotenen Staffelmengen stimmen nicht mit der Anfrage überein." },
+      { status: 400 },
+    );
+
+  const recipients = Array.from(
+    new Set(
+      [
+        String(requestRow.employee_email || "").trim().toLowerCase(),
+        Number(requestRow.mail_to_main)
+          ? String(requestRow.customer_email || "").trim().toLowerCase()
+          : "",
+      ].filter(validEmail),
+    ),
+  );
+  if (!recipients.length)
+    return json(
+      { error: "Beim Kunden ist keine gültige E-Mail-Adresse vorhanden." },
+      { status: 400 },
+    );
+  const sender = await db
+    .prepare(
+      "SELECT * FROM email_sender_profiles WHERE active = 1 ORDER BY is_default DESC, id LIMIT 1",
+    )
+    .first<EmailSenderRow>();
+  if (!sender?.password_ciphertext)
+    return json(
+      {
+        error:
+          "Bitte zuerst unter E-Mail-Einstellungen einen aktiven SMTP-Absender einrichten.",
+      },
+      { status: 400 },
+    );
+  const workflow = await db
+    .prepare(
+      "SELECT offer_template, attach_offer_document, attach_offer_gzd FROM workflow_settings ORDER BY id LIMIT 1",
+    )
+    .first<Record<string, string | number | null>>();
+  if (!workflow)
+    return json(
+      { error: "Die Angebotsvorlage wurde nicht gefunden." },
+      { status: 500 },
+    );
+
+  const article = [
+    String(requestRow.designation_1 || requestPayload.article || ""),
+    String(requestRow.designation_2 || ""),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const markupPercent = Number(requestRow.markup_percent || 0);
+  const firstOption = options[0];
+  const subtotal = firstOption.supplierTotal;
+  const markupAmount = (subtotal * markupPercent) / 100;
+  const total = subtotal + markupAmount;
+  const projectId = Number(requestRow.project_id || requestPayload.projectId || requestId);
+  const portalUrl = `${url.origin}/${encodeURIComponent(String(requestRow.customer_number))}`;
+  const values = {
+    supplier: String(requestRow.supplier_name || requestPayload.supplier || "Lieferant"),
+    customer: String(requestRow.customer_name),
+    article,
+    quantity: firstOption.quantity,
+    quantities: options.map((option) => `${option.quantity} Stück`).join(", "),
+    deliveryDate,
+    note: deliveryNote || supplierNote || "Keine Bemerkung",
+    project: projectId,
+    total: total.toFixed(2),
+    offerNumber,
+    portalUrl,
+  };
+  const offerText = renderEmailTemplate(
+    String(workflow.offer_template || "").replaceAll("\\n", "\n"),
+    values,
+  );
+  const messageBody = offerText.includes(portalUrl)
+    ? `${offerText}\n\nAngebotsnummer: ${offerNumber}`
+    : `${offerText}\n\nAngebot im Kundenportal öffnen:\n${portalUrl}\nAngebotsnummer: ${offerNumber}`;
+  const subject = `Ihr Angebot ${offerNumber} für ${article}`;
+
+  const requestedGzdName = String(body.gzd || "").trim().slice(0, 240);
+  let requestedGzdUrl = String(body.gzdUrl || "").trim();
+  if (requestedGzdName && requestedGzdName === requestPayload.printFile)
+    requestedGzdUrl = requestPayload.printFileUrl || requestedGzdUrl;
+  const attachments: EmailAttachment[] = [];
+  const warnings: string[] = [];
+  if (Number(workflow.attach_offer_document)) {
+    const pdfDataUri = await createDocumentPdfDataUri({
+      number: offerNumber,
+      type: "Angebot",
+      status: "Offen",
+      date: new Intl.DateTimeFormat("de-CH").format(new Date()),
+      customer: String(requestRow.customer_name),
+      employee: String(requestRow.employee_name),
+      supplier: String(requestRow.supplier_name || requestPayload.supplier || "Lieferant"),
+      projectId,
+      article,
+      quantity: firstOption.quantity,
+      unitPrice: firstOption.unitPrice,
+      subtotal,
+      markupPercent,
+      markupAmount,
+      total,
+      deliveryDate: requestPayload.deliveryDate,
+      supplierDeliveryDate: deliveryDate,
+      supplierDeliveryNote: deliveryNote || undefined,
+      note: supplierNote,
+      documentText: offerText,
+      printFile: requestPayload.printFile,
+      supplierGzd: requestedGzdName || undefined,
+      gzdStatus: requestedGzdName ? "In Prüfung" : undefined,
+      offerOptions: options,
+    });
+    attachments.push({
+      filename: `${offerNumber}.pdf`,
+      contentType: "application/pdf",
+      contentBase64: pdfDataUri.slice(pdfDataUri.indexOf(",") + 1),
+    });
+  }
+  if (Number(workflow.attach_offer_gzd) && requestedGzdName) {
+    if (requestedGzdUrl) {
+      try {
+        attachments.push(
+          await mailAttachmentFromStoredFile(
+            env,
+            url.origin,
+            requestedGzdUrl,
+            requestedGzdName,
+          ),
+        );
+      } catch (error) {
+        warnings.push(
+          `Das GzD konnte nicht angehängt werden (${error instanceof Error ? error.message : "unbekannter Fehler"}).`,
+        );
+      }
+    } else warnings.push("Für das ausgewählte GzD ist keine Datei verfügbar.");
+  }
+
+  const password = await decryptEmailPassword(
+    env,
+    db,
+    sender.password_ciphertext,
+  );
+  const results = await Promise.allSettled(
+    recipients.map((recipient) =>
+      sendSmtpMessage(
+        sender,
+        password,
+        recipient,
+        subject,
+        messageBody,
+        attachments,
+      ),
+    ),
+  );
+  const sent = results.filter((result) => result.status === "fulfilled").length;
+  const failed = results.length - sent;
+  if (!sent) {
+    const firstFailure = results.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    return json(
+      {
+        error:
+          firstFailure?.reason instanceof Error
+            ? firstFailure.reason.message
+            : "Die Angebotsmail konnte nicht versendet werden.",
+      },
+      { status: 502 },
+    );
+  }
+  return json({
+    ok: true,
+    sent,
+    failed,
+    attachmentCount: attachments.length,
+    warning: warnings.join(" "),
+    message:
+      failed > 0
+        ? `${sent} Kundenmail(s) versendet, ${failed} fehlgeschlagen.`
+        : `${sent} Kundenmail(s) erfolgreich versendet.`,
+  });
+}
+
+async function sendOrderEmail(
+  body: Record<string, unknown>,
+  request: Request,
+  url: URL,
+  env: Env,
+  db: D1Database,
+) {
+  const origin = request.headers.get("Origin");
+  if (origin && origin !== url.origin)
+    return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
+  await ensureFullSchema(db);
+  const offerId = Number(body.offerId);
+  const orderNumber = safeMailHeader(String(body.orderNumber || ""));
+  const quantity = Number(body.quantity);
+  const rawItemQuantities =
+    body.itemQuantities && typeof body.itemQuantities === "object"
+      ? (body.itemQuantities as Record<string, unknown>)
+      : undefined;
+  if (
+    !Number.isInteger(offerId) ||
+    offerId <= 0 ||
+    !/^BE-\d{4}-\d{3,}$/.test(orderNumber)
+  )
+    return json(
+      { error: "Die Bestelldaten sind unvollständig." },
+      { status: 400 },
+    );
+  const offerRow = await db
+    .prepare(
+      "SELECT d.id, d.project_id, d.payload, c.name AS customer_name, e.name AS employee_name FROM documents d JOIN customers c ON c.id = d.customer_id LEFT JOIN customer_employees e ON e.id = d.customer_employee_id WHERE d.id = ? AND d.type = 'Angebot' AND d.status = 'Offen' LIMIT 1",
+    )
+    .bind(offerId)
+    .first<Record<string, string | number | null>>();
+  if (!offerRow)
+    return json(
+      { error: "Das offene Angebot wurde nicht gefunden." },
+      { status: 404 },
+    );
+  const offer = parseJson<StateDocument>(
+    String(offerRow.payload || "{}"),
+    {} as StateDocument,
+  );
+  const workflow = await db
+    .prepare(
+      "SELECT order_template FROM workflow_settings ORDER BY id LIMIT 1",
+    )
+    .first<Record<string, string | number | null>>();
+  const sender = await db
+    .prepare(
+      "SELECT * FROM email_sender_profiles WHERE active = 1 ORDER BY is_default DESC, id LIMIT 1",
+    )
+    .first<EmailSenderRow>();
+  if (!sender?.password_ciphertext)
+    return json(
+      { error: "Es ist kein aktiver SMTP-Absender eingerichtet." },
+      { status: 400 },
+    );
+  const backendRecipient = String(sender.from_email || "")
+    .trim()
+    .toLowerCase();
+  if (!validEmail(backendRecipient))
+    return json(
+      {
+        error:
+          "Beim Standardabsender ist keine gültige E-Mail-Adresse hinterlegt.",
+      },
+      { status: 400 },
+    );
+  let orderItems: StateDocumentItem[] | undefined;
+  let selectedOption:
+    | { quantity: number; unitPrice: number; supplierTotal?: number }
+    | undefined;
+  if (offer.items?.length) {
+    if (!rawItemQuantities)
+      return json(
+        { error: "Die ausgewählten Artikelmengen fehlen." },
+        { status: 400 },
+      );
+    if (
+      offer.items.some((item) => {
+        const selectedQuantity = Number(
+          rawItemQuantities[String(item.articleId)],
+        );
+        return !item.offerOptions?.some(
+          (offerOption) => offerOption.quantity === selectedQuantity,
+        );
+      })
+    )
+      return json(
+        { error: "Mindestens eine gewählte Angebotsstaffel ist ungültig." },
+        { status: 400 },
+      );
+    orderItems = offer.items.map((item) => {
+      const selectedQuantity = Number(rawItemQuantities[String(item.articleId)]);
+      const option = item.offerOptions!.find(
+        (offerOption) => offerOption.quantity === selectedQuantity,
+      )!;
+      const subtotal = option.supplierTotal ?? option.quantity * option.unitPrice;
+      return {
+        ...item,
+        quantity: option.quantity,
+        unitPrice: option.unitPrice,
+        subtotal,
+        markupAmount: 0,
+        total: subtotal,
+        requestedQuantities: undefined,
+        offerOptions: undefined,
+      };
+    });
+    selectedOption = {
+      quantity: orderItems[0].quantity,
+      unitPrice: orderItems[0].unitPrice,
+      supplierTotal: orderItems[0].subtotal,
+    };
+  } else {
+    selectedOption = offer.offerOptions?.find(
+      (option) => option.quantity === quantity,
+    );
+    if (!selectedOption)
+      return json(
+        { error: "Die gewählte Angebotsstaffel ist ungültig." },
+        { status: 400 },
+      );
+  }
+  const subtotal = orderItems?.length
+    ? orderItems.reduce((sum, item) => sum + item.subtotal, 0)
+    : selectedOption.supplierTotal ??
+      selectedOption.quantity * selectedOption.unitPrice;
+  const projectId = Number(offerRow.project_id || offer.projectId || offerId);
+  const values = {
+    supplier: offer.supplier || "Lieferant",
+    customer: String(offerRow.customer_name),
+    article: orderItems?.length
+      ? `Sammelbestellung mit ${orderItems.length} Artikeln`
+      : offer.article,
+    quantity: orderItems?.length
+      ? `${orderItems.length} Artikel`
+      : selectedOption.quantity,
+    deliveryDate:
+      offer.supplierDeliveryDate || offer.deliveryDate || "auf Anfrage",
+    note: offer.supplierDeliveryNote || offer.supplierNote || "",
+    project: projectId,
+    total: subtotal.toFixed(2),
+    orderNumber,
+  };
+  const orderText = renderEmailTemplate(
+    String(workflow?.order_template || "").replaceAll("\\n", "\n"),
+    values,
+  );
+  const pdfDataUri = await createDocumentPdfDataUri({
+    number: orderNumber,
+    type: "Bestellung",
+    status: "Versendet",
+    date: new Intl.DateTimeFormat("de-CH").format(new Date()),
+    customer: String(offerRow.customer_name),
+    employee: String(offerRow.employee_name || "Kundenportal"),
+    supplier: offer.supplier,
+    projectId,
+    article: orderItems?.length
+      ? `Sammelbestellung · ${orderItems.length} Artikel`
+      : offer.article,
+    quantity: selectedOption.quantity,
+    unitPrice: selectedOption.unitPrice,
+    subtotal,
+    markupPercent: 0,
+    markupAmount: 0,
+    total: subtotal,
+    supplierDeliveryDate: offer.supplierDeliveryDate,
+    supplierDeliveryNote: offer.supplierDeliveryNote,
+    note: offer.supplierNote,
+    documentText: orderText,
+    printFile: offer.printFile,
+    supplierGzd: offer.supplierGzd,
+    items: orderItems,
+  });
+  const messageBody = `${orderText}\n\nDie Bestellung wurde vom Kunden im Kundenportal ausgelöst.\nBestellnummer: ${orderNumber}\nProjekt: ${projectId}`;
+  await sendSmtpMessage(
+    sender,
+    await decryptEmailPassword(env, db, sender.password_ciphertext),
+    backendRecipient,
+    `Neue Kundenbestellung ${orderNumber} · ${String(offerRow.customer_name)}`,
+    messageBody,
+    [
+      {
+        filename: `${orderNumber}.pdf`,
+        contentType: "application/pdf",
+        contentBase64: pdfDataUri.slice(pdfDataUri.indexOf(",") + 1),
+      },
+    ],
+  );
+  return json({
+    ok: true,
+    message: `Der Bestellungsbeleg wurde an den Standardabsender ${backendRecipient} gesendet.`,
+  });
 }
 
 async function readFullState(db: D1Database) {
@@ -1009,7 +2452,7 @@ async function readFullState(db: D1Database) {
   ] = await Promise.all([
     db
       .prepare(
-        "SELECT a.id, a.sku, a.name, a.customer_id, a.supplier_id, a.supplier_group_id, a.stock, a.reorder_point, a.unit_price, a.tier_quantities_json, s.name AS supplier_name, g.name AS group_name FROM articles a LEFT JOIN suppliers s ON s.id = a.supplier_id LEFT JOIN supplier_groups g ON g.id = a.supplier_group_id ORDER BY a.name",
+        "SELECT a.id, a.sku, a.designation_1, a.designation_2, a.customer_id, a.supplier_id, a.supplier_group_id, a.stock, a.reorder_point, a.unit_price, s.name AS supplier_name, g.name AS group_name FROM articles a LEFT JOIN suppliers s ON s.id = a.supplier_id LEFT JOIN supplier_groups g ON g.id = a.supplier_group_id ORDER BY a.designation_1, a.designation_2",
       )
       .all<Record<string, string | number | null>>(),
     db
@@ -1090,7 +2533,11 @@ async function readFullState(db: D1Database) {
   const articles = articleRows.results.map((row) => ({
     id: Number(row.id),
     sku: String(row.sku),
-    name: String(row.name),
+    designation1: String(row.designation_1),
+    designation2: String(row.designation_2),
+    name: [String(row.designation_1), String(row.designation_2)]
+      .filter(Boolean)
+      .join(" · "),
     customerId: row.customer_id == null ? undefined : Number(row.customer_id),
     supplier: row.group_name
       ? `group:${row.group_name}`
@@ -1100,7 +2547,6 @@ async function readFullState(db: D1Database) {
     stock: Number(row.stock),
     minimum: Number(row.reorder_point),
     unitPrice: Number(row.unit_price),
-    tierQuantities: parseJson<number[]>(String(row.tier_quantities_json), []),
     stockHistory: stockByArticle.get(Number(row.id)) ?? [],
     templates: templatesByArticle.get(Number(row.id)) ?? [],
   }));
@@ -1176,6 +2622,14 @@ async function readFullState(db: D1Database) {
         offerTemplate: String(workflowRow.offer_template),
         orderTemplate: String(workflowRow.order_template),
         confirmationTemplate: String(workflowRow.confirmation_template),
+        employeeLoginSubject: String(
+          workflowRow.employee_login_subject ??
+            "Ihr Zugang zum Printcenter von {company}",
+        ),
+        employeeLoginTemplate: String(
+          workflowRow.employee_login_template ??
+            "Guten Tag {salutation} {lastName},\\n\\nIhr persönlicher Zugang zum Kundenportal von {company} ist eingerichtet.\\n\\nPortal: {portalUrl}\\nLogin: {email}\\nPasswort: {password}\\n\\nBitte bewahren Sie diese Zugangsdaten sicher auf.\\n\\nFreundliche Grüsse\\nPrintcenter",
+        ).replaceAll("\\n", "\n"),
         supplierOfferSubject: String(workflowRow.supplier_offer_subject),
         offerEmail: String(workflowRow.offer_email),
         orderEmail: String(workflowRow.order_email),
@@ -1210,6 +2664,12 @@ async function readFullState(db: D1Database) {
 
 async function replaceFullState(db: D1Database, state: FullState) {
   await ensureFullSchema(db);
+  const articleColumns = await db
+    .prepare("PRAGMA table_info(articles)")
+    .all<{ name: string }>();
+  const hasLegacyArticleName = articleColumns.results.some(
+    (column) => column.name === "name",
+  );
   const statements: D1PreparedStatement[] = [];
   for (const table of [
     "document_attachments",
@@ -1283,11 +2743,10 @@ async function replaceFullState(db: D1Database, state: FullState) {
       );
   }
   for (const supplier of state.suppliers) {
-    const days = Number.parseInt(supplier.leadTime, 10) || null;
     statements.push(
       db
         .prepare(
-          "INSERT INTO suppliers (id, supplier_number, name, contact_name, email, phone, lead_time_days, lead_time_text, group_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO suppliers (id, supplier_number, name, contact_name, email, phone, group_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(
           supplier.id,
@@ -1296,8 +2755,6 @@ async function replaceFullState(db: D1Database, state: FullState) {
           supplier.contact,
           supplier.email,
           supplier.phone,
-          days,
-          supplier.leadTime,
           groupIds.get(supplier.group) ?? null,
         ),
     );
@@ -1321,15 +2778,12 @@ async function replaceFullState(db: D1Database, state: FullState) {
     const supplierId = groupName
       ? null
       : (suppliersByName.get(article.supplier) ?? null);
-    statements.push(
-      db
-        .prepare(
-          "INSERT INTO articles (id, sku, name, customer_id, supplier_id, supplier_group_id, stock, reorder_point, unit_price, tier_quantities_json, stock_history_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(
+    const articleValues = [
           article.id,
           article.sku,
-          article.name,
+          ...(hasLegacyArticleName ? [article.name] : []),
+          article.designation1 || article.name,
+          article.designation2 || "",
           article.customerId &&
             state.customers.some(
               (customer) => customer.id === article.customerId,
@@ -1341,9 +2795,16 @@ async function replaceFullState(db: D1Database, state: FullState) {
           article.stock,
           article.minimum,
           article.unitPrice,
-          JSON.stringify(article.tierQuantities),
           JSON.stringify(article.stockHistory),
-        ),
+        ];
+    statements.push(
+      db
+        .prepare(
+          hasLegacyArticleName
+            ? "INSERT INTO articles (id, sku, name, designation_1, designation_2, customer_id, supplier_id, supplier_group_id, stock, reorder_point, unit_price, stock_history_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            : "INSERT INTO articles (id, sku, designation_1, designation_2, customer_id, supplier_id, supplier_group_id, stock, reorder_point, unit_price, stock_history_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(...articleValues),
     );
     article.stockHistory.forEach((event, index) =>
       statements.push(
@@ -1480,35 +2941,49 @@ async function replaceFullState(db: D1Database, state: FullState) {
           payload,
         ),
     );
-    statements.push(
-      db
-        .prepare(
-          "INSERT INTO document_lines (document_id, article_id, title, quantity, unit_price, line_total) VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(
-          document.id,
-          document.articleId && validArticleIds.has(document.articleId)
-            ? document.articleId
-            : null,
-          document.article,
-          document.quantity,
-          document.unitPrice,
-          document.total,
-        ),
-    );
-    for (const option of document.offerOptions ?? [])
+    const documentItems = document.items?.length
+      ? document.items
+      : [
+          {
+            articleId: document.articleId ?? 0,
+            sku: "",
+            article: document.article,
+            quantity: document.quantity,
+            unitPrice: document.unitPrice,
+            total: document.total,
+          },
+        ];
+    for (const item of documentItems)
       statements.push(
         db
           .prepare(
-            "INSERT INTO document_offer_options (document_id, quantity, supplier_unit_price, supplier_total) VALUES (?, ?, ?, ?)",
+            "INSERT INTO document_lines (document_id, article_id, title, quantity, unit_price, line_total) VALUES (?, ?, ?, ?, ?, ?)",
           )
           .bind(
             document.id,
-            option.quantity,
-            option.unitPrice,
-            option.supplierTotal ?? option.quantity * option.unitPrice,
+            item.articleId && validArticleIds.has(item.articleId)
+              ? item.articleId
+              : null,
+            item.article,
+            item.quantity,
+            item.unitPrice,
+            item.total,
           ),
       );
+    if (!document.items?.length)
+      for (const option of document.offerOptions ?? [])
+        statements.push(
+          db
+            .prepare(
+              "INSERT INTO document_offer_options (document_id, quantity, supplier_unit_price, supplier_total) VALUES (?, ?, ?, ?)",
+            )
+            .bind(
+              document.id,
+              option.quantity,
+              option.unitPrice,
+              option.supplierTotal ?? option.quantity * option.unitPrice,
+            ),
+        );
     if (document.printFile)
       statements.push(
         db
@@ -1535,6 +3010,34 @@ async function replaceFullState(db: D1Database, state: FullState) {
             `documents/${document.id}/supplier-${document.supplierGzd}`,
           ),
       );
+    for (const item of document.items ?? []) {
+      if (item.printFile)
+        statements.push(
+          db
+            .prepare(
+              "INSERT INTO document_attachments (document_id, kind, file_name, object_key) VALUES (?, ?, ?, ?)",
+            )
+            .bind(
+              document.id,
+              "customer_gzd",
+              item.printFile,
+              `documents/${document.id}/article-${item.articleId}-customer-${item.printFile}`,
+            ),
+        );
+      if (item.supplierGzd)
+        statements.push(
+          db
+            .prepare(
+              "INSERT INTO document_attachments (document_id, kind, file_name, object_key) VALUES (?, ?, ?, ?)",
+            )
+            .bind(
+              document.id,
+              "supplier_gzd",
+              item.supplierGzd,
+              `documents/${document.id}/article-${item.articleId}-supplier-${item.supplierGzd}`,
+            ),
+        );
+    }
   }
   for (const user of state.backendUsers)
     statements.push(
@@ -1555,13 +3058,17 @@ async function replaceFullState(db: D1Database, state: FullState) {
   statements.push(
     db
       .prepare(
-        "INSERT INTO workflow_settings (id, request_template, offer_template, order_template, confirmation_template, supplier_offer_subject, offer_email, order_email, attach_request_document, attach_request_gzd, attach_offer_document, attach_offer_gzd, attach_order_document, attach_order_gzd, attach_confirmation_document, attach_confirmation_gzd, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        "INSERT INTO workflow_settings (id, request_template, offer_template, order_template, confirmation_template, employee_login_subject, employee_login_template, supplier_offer_subject, offer_email, order_email, attach_request_document, attach_request_gzd, attach_offer_document, attach_offer_gzd, attach_order_document, attach_order_gzd, attach_confirmation_document, attach_confirmation_gzd, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
       )
       .bind(
         workflow.requestTemplate,
         workflow.offerTemplate,
         workflow.orderTemplate,
         workflow.confirmationTemplate,
+        workflow.employeeLoginSubject ||
+          "Ihr Zugang zum Printcenter von {company}",
+        workflow.employeeLoginTemplate ||
+          "Guten Tag {salutation} {lastName},\n\nIhr persönlicher Zugang zum Kundenportal von {company} ist eingerichtet.\n\nPortal: {portalUrl}\nLogin: {email}\nPasswort: {password}\n\nBitte bewahren Sie diese Zugangsdaten sicher auf.\n\nFreundliche Grüsse\nPrintcenter",
         workflow.supplierOfferSubject,
         workflow.offerEmail,
         workflow.orderEmail,
@@ -1683,6 +3190,9 @@ async function handleDirectoryApi(
   const employeeMatch = url.pathname.match(
     /^\/api\/customers\/(\d+)\/employees(?:\/(\d+))?$/,
   );
+  const employeeLoginMailMatch = url.pathname.match(
+    /^\/api\/customers\/(\d+)\/employees\/(\d+)\/send-login$/,
+  );
   const supplierMatch = url.pathname.match(/^\/api\/suppliers\/(\d+)$/);
   const emailSenderMatch = url.pathname.match(
     /^\/api\/email-senders\/(\d+)(?:\/(test))?$/,
@@ -1709,6 +3219,23 @@ async function handleDirectoryApi(
     request.method === "GET" || request.method === "DELETE"
       ? {}
       : await request.json<Record<string, unknown>>();
+
+  if (url.pathname === "/api/request-emails" && request.method === "POST")
+    return sendRequestEmails(body, request, url, env, db);
+  if (
+    url.pathname === "/api/collective-request-emails" &&
+    request.method === "POST"
+  )
+    return sendCollectiveRequestEmails(body, request, url, env, db);
+  if (url.pathname === "/api/offer-emails" && request.method === "POST")
+    return sendOfferEmails(body, request, url, env, db);
+  if (
+    url.pathname === "/api/collective-offer-emails" &&
+    request.method === "POST"
+  )
+    return sendCollectiveOfferEmails(body, request, url, env, db);
+  if (url.pathname === "/api/order-emails" && request.method === "POST")
+    return sendOrderEmail(body, request, url, env, db);
 
   if (url.pathname.startsWith("/api/email-senders")) {
     const origin = request.headers.get("Origin");
@@ -1859,6 +3386,91 @@ async function handleDirectoryApi(
           .run();
       return json(
         { error: error instanceof Error ? error.message : "E-Mail-Einstellungen konnten nicht verarbeitet werden." },
+        { status: 400 },
+      );
+    }
+  }
+
+  if (employeeLoginMailMatch && request.method === "POST") {
+    const origin = request.headers.get("Origin");
+    if (origin && origin !== url.origin)
+      return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
+    const customerId = Number(employeeLoginMailMatch[1]);
+    const employeeId = Number(employeeLoginMailMatch[2]);
+    const employee = await db
+      .prepare(
+        "SELECT e.name, e.salutation, e.first_name, e.last_name, e.email, e.password_hash, c.name AS company, c.customer_number FROM customer_employees e JOIN customers c ON c.id = e.customer_id WHERE e.id = ? AND e.customer_id = ? AND e.active = 1",
+      )
+      .bind(employeeId, customerId)
+      .first<Record<string, string | number | null>>();
+    if (!employee)
+      return json(
+        { error: "Der aktive Mitarbeiterzugang wurde nicht gefunden." },
+        { status: 404 },
+      );
+    const sender = await db
+      .prepare(
+        "SELECT * FROM email_sender_profiles WHERE active = 1 ORDER BY is_default DESC, id LIMIT 1",
+      )
+      .first<EmailSenderRow>();
+    if (!sender?.password_ciphertext)
+      return json(
+        {
+          error:
+            "Bitte zuerst unter E-Mail-Einstellungen einen aktiven SMTP-Absender einrichten.",
+        },
+        { status: 400 },
+      );
+    const workflow = await db
+      .prepare(
+        "SELECT employee_login_subject, employee_login_template FROM workflow_settings ORDER BY id LIMIT 1",
+      )
+      .first<Record<string, string | null>>();
+    const salutation =
+      employee.salutation && employee.salutation !== "Divers"
+        ? String(employee.salutation)
+        : "";
+    const values = {
+      company: String(employee.company),
+      salutation,
+      firstName: String(employee.first_name ?? ""),
+      lastName: String(employee.last_name ?? ""),
+      employee: String(employee.name),
+      email: String(employee.email),
+      password: String(employee.password_hash),
+      portalUrl: `${url.origin}/${encodeURIComponent(String(employee.customer_number))}`,
+    };
+    const subject = renderEmailTemplate(
+      String(
+        workflow?.employee_login_subject ??
+          "Ihr Zugang zum Printcenter von {company}",
+      ),
+      values,
+    ).replace(/[\r\n]+/g, " ");
+    const messageBody = renderEmailTemplate(
+      String(
+        workflow?.employee_login_template ??
+          "Guten Tag {salutation} {lastName},\\n\\nIhr persönlicher Zugang zum Kundenportal von {company} ist eingerichtet.\\n\\nPortal: {portalUrl}\\nLogin: {email}\\nPasswort: {password}\\n\\nBitte bewahren Sie diese Zugangsdaten sicher auf.\\n\\nFreundliche Grüsse\\nPrintcenter",
+      ).replaceAll("\\n", "\n"),
+      values,
+    );
+    try {
+      await sendSmtpMessage(
+        sender,
+        await decryptEmailPassword(env, db, sender.password_ciphertext),
+        String(employee.email),
+        subject,
+        messageBody,
+      );
+      return json({ ok: true });
+    } catch (error) {
+      return json(
+        {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Die Zugangsdaten konnten nicht versendet werden.",
+        },
         { status: 400 },
       );
     }
@@ -2072,11 +3684,9 @@ async function handleDirectoryApi(
   if (request.method === "POST" && url.pathname === "/api/suppliers") {
     const number = await nextNumber(db, "suppliers");
     const groupId = await resolveGroupId(db, String(body.group || ""));
-    const leadTimeDays =
-      Number.parseInt(String(body.leadTime || ""), 10) || null;
     const result = await db
       .prepare(
-        "INSERT INTO suppliers (supplier_number, name, contact_name, email, phone, lead_time_days, lead_time_text, group_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO suppliers (supplier_number, name, contact_name, email, phone, group_id) VALUES (?, ?, ?, ?, ?, ?)",
       )
       .bind(
         number,
@@ -2084,8 +3694,6 @@ async function handleDirectoryApi(
         body.contact,
         body.email,
         body.phone,
-        leadTimeDays,
-        body.leadTime,
         groupId,
       )
       .run();
@@ -2098,19 +3706,15 @@ async function handleDirectoryApi(
   }
   if (supplierMatch && request.method === "PUT") {
     const groupId = await resolveGroupId(db, String(body.group || ""));
-    const leadTimeDays =
-      Number.parseInt(String(body.leadTime || ""), 10) || null;
     await db
       .prepare(
-        "UPDATE suppliers SET name = ?, contact_name = ?, email = ?, phone = ?, lead_time_days = ?, lead_time_text = ?, group_id = ? WHERE id = ?",
+        "UPDATE suppliers SET name = ?, contact_name = ?, email = ?, phone = ?, group_id = ? WHERE id = ?",
       )
       .bind(
         body.name,
         body.contact,
         body.email,
         body.phone,
-        leadTimeDays,
-        body.leadTime,
         groupId,
         Number(supplierMatch[1]),
       )

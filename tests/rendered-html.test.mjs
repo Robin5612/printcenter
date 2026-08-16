@@ -17,13 +17,25 @@ async function render(pathname = "/") {
   );
 }
 
-test("server-renders the Printcenter backend login", async () => {
+test("server-renders the general customer login at the root URL", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
   assert.match(html, /<title>Printcenter · Druckproduktion im Fluss<\/title>/i);
+  assert.match(html, /KUNDENPORTAL/);
+  assert.match(html, /Kundenlogin\./);
+  assert.match(html, /Kundennummer/);
+  assert.doesNotMatch(html, /BACKEND-ZUGANG|Backend anmelden\./);
+});
+
+test("keeps the backend login exclusively at /backend", async () => {
+  const response = await render("/backend");
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
+
+  const html = await response.text();
   assert.match(html, /BACKEND-ZUGANG/);
   assert.match(html, /Backend anmelden\./);
   assert.doesNotMatch(
@@ -44,5 +56,17 @@ test("keeps the public customer route available", async () => {
 
   const html = await response.text();
   assert.match(html, /Printcenter/);
+  assert.match(html, /K-10024[\s\S]*KUNDENPORTAL/);
+  assert.doesNotMatch(html, /BACKEND-ZUGANG|Backend anmelden\./);
   assert.doesNotMatch(html, /Your site is taking shape/i);
+});
+
+test("never falls back to the backend login for an unknown customer number", async () => {
+  const response = await render("/UNBEKANNT");
+  assert.equal(response.status, 200);
+
+  const html = await response.text();
+  assert.match(html, /Kundenlogin\./);
+  assert.match(html, /Kundennummer/);
+  assert.doesNotMatch(html, /BACKEND-ZUGANG|Backend anmelden\./);
 });

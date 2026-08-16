@@ -16,6 +16,7 @@ type View =
   | "Belege"
   | "Artikel"
   | "Einstellungen";
+type EntryRoute = "customer-home" | "backend" | "customer" | "supplier";
 type Salutation = "Frau" | "Herr" | "Divers";
 type Employee = {
   id: number;
@@ -55,7 +56,6 @@ type Supplier = {
   contact: string;
   email: string;
   phone: string;
-  leadTime: string;
 };
 type GzdTemplate = { id: number; file: string; addedAt: string; url?: string };
 type StockEvent = {
@@ -67,13 +67,14 @@ type StockEvent = {
 type Article = {
   id: number;
   sku: string;
+  designation1: string;
+  designation2: string;
   name: string;
   customerId?: number;
   supplier: string;
   stock: number;
   minimum: number;
   unitPrice: number;
-  tierQuantities: number[];
   stockHistory: StockEvent[];
   templates: GzdTemplate[];
 };
@@ -83,6 +84,23 @@ type OfferOption = {
   supplierTotal?: number;
 };
 type GzdStatus = "Freigegeben" | "In Prüfung" | "Abgelehnt";
+type DocumentItem = {
+  articleId: number;
+  sku: string;
+  article: string;
+  quantity: number;
+  requestedQuantities?: number[];
+  unitPrice: number;
+  subtotal: number;
+  markupAmount: number;
+  total: number;
+  printFile?: string;
+  printFileUrl?: string;
+  supplierGzd?: string;
+  supplierGzdUrl?: string;
+  gzdStatus?: GzdStatus;
+  offerOptions?: OfferOption[];
+};
 type DocumentRecord = {
   id: number;
   number: string;
@@ -123,6 +141,7 @@ type DocumentRecord = {
   supplierNote?: string;
   gzdStatus?: GzdStatus;
   offerOptions?: OfferOption[];
+  items?: DocumentItem[];
   pdfUrl?: string;
   status: "Offen" | "Versendet" | "Bestätigt";
 };
@@ -131,6 +150,8 @@ type WorkflowSettings = {
   offerTemplate: string;
   orderTemplate: string;
   confirmationTemplate: string;
+  employeeLoginSubject: string;
+  employeeLoginTemplate: string;
   supplierOfferSubject: string;
   offerEmail: string;
   orderEmail: string;
@@ -219,6 +240,8 @@ const formatMoney = (value: number) => {
   return `CHF ${integer.replace(/\B(?=(\d{3})+(?!\d))/g, "’")}.${decimals}`;
 };
 const formatUnitMoney = (value: number) => `CHF ${value.toFixed(4)}`;
+const backendSessionStorageKey = "printcenter:backend-session:v1";
+const customerSessionStorageKey = "printcenter:customer-session:v1";
 const supplierTotalForOption = (option: OfferOption) =>
   option.supplierTotal ?? option.quantity * option.unitPrice;
 const customerTotalForOption = (option: OfferOption, markupPercent: number) =>
@@ -239,21 +262,28 @@ const employeeDisplayName = (employee: Employee) => {
     .filter(Boolean)
     .join(" ");
 };
-const employeeGreeting = (employee: Employee) => {
-  const fallback = splitPersonName(employee.name);
-  const firstName = employee.firstName || fallback.firstName;
-  const lastName = employee.lastName || fallback.lastName;
-  if (employee.salutation === "Frau" && lastName)
-    return `Guten Tag Frau ${lastName}`;
-  if (employee.salutation === "Herr" && lastName)
-    return `Guten Tag Herr ${lastName}`;
-  return `Guten Tag ${[firstName, lastName].filter(Boolean).join(" ")}`;
+const articleNameFromDesignations = (
+  designation1: string,
+  designation2: string,
+) => [designation1.trim(), designation2.trim()].filter(Boolean).join(" · ");
+const normalizeArticle = (article: Article): Article => {
+  const legacyParts = String(article.name || "").split(" · ");
+  const designation1 = String(article.designation1 || legacyParts[0] || "").trim();
+  const designation2 = String(
+    article.designation2 || legacyParts.slice(1).join(" · ") || "",
+  ).trim();
+  return {
+    ...article,
+    designation1,
+    designation2,
+    name: articleNameFromDesignations(designation1, designation2),
+  };
 };
 type StockSignal = "rot" | "gelb" | "grün";
 const stockSignalFor = (article: Article): StockSignal =>
-  article.stock < article.minimum
+  article.stock < 0
     ? "rot"
-    : article.stock === article.minimum
+    : article.stock <= article.minimum
       ? "gelb"
       : "grün";
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
@@ -333,6 +363,10 @@ function parseCsv(text: string) {
 }
 const today = () =>
   new Intl.DateTimeFormat("de-CH", { dateStyle: "medium" }).format(new Date());
+const formatPortalDate = (value: string) => {
+  const iso = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return iso ? `${iso[3]}.${iso[2]}.${iso[1]}` : value;
+};
 const documentCreatedAt = (document: DocumentRecord) => {
   if (document.createdAt) {
     const timestamp = Date.parse(document.createdAt);
@@ -345,6 +379,116 @@ const documentCreatedAt = (document: DocumentRecord) => {
   }
   const timestamp = Date.parse(document.date);
   return Number.isFinite(timestamp) ? timestamp : 0;
+};
+const gzdDateTimestamp = (value: string) => {
+  const swissDate = value.match(
+    /^(\d{1,2})\.(\d{1,2})\.(\d{4})(?:,?\s+(\d{1,2}):(\d{2}))?/,
+  );
+  if (swissDate) {
+    const [, day, month, year, hours = "0", minutes = "0"] = swissDate;
+    return new Date(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hours),
+      Number(minutes),
+    ).getTime();
+  }
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+};
+type ArticleGzdFile = {
+  id: number;
+  key: string;
+  name: string;
+  url?: string;
+  source: string;
+  addedAt: string;
+  timestamp: number;
+};
+const collectArticleGzdFiles = (
+  article: Article,
+  documents: DocumentRecord[],
+): ArticleGzdFile[] => {
+  const articleDocuments = documents.filter(
+    (document) =>
+      document.articleId === article.id ||
+      document.items?.some((item) => item.articleId === article.id) ||
+      (!document.articleId && document.article === article.name),
+  );
+  const files: ArticleGzdFile[] = [
+    ...article.templates.map((template) => ({
+      id: template.id,
+      key: `template-${template.id}`,
+      name: template.file,
+      url: template.url,
+      source: "Artikelvorlage",
+      addedAt: template.addedAt,
+      timestamp: gzdDateTimestamp(template.addedAt),
+    })),
+    ...articleDocuments.flatMap((document) => {
+      const addedAt = `${document.number} · ${document.date}`;
+      const timestamp = documentCreatedAt(document);
+      const documentFiles: ArticleGzdFile[] = [];
+      const documentItem = document.items?.find(
+        (item) => item.articleId === article.id,
+      );
+      if (documentItem?.supplierGzd)
+        documentFiles.push({
+          id: document.id * 1000 + article.id * 2 + 1,
+          key: `supplier-${document.id}-${article.id}-${documentItem.supplierGzd}`,
+          name: documentItem.supplierGzd,
+          url: documentItem.supplierGzdUrl,
+          source: "Vom Lieferanten",
+          addedAt,
+          timestamp,
+        });
+      if (documentItem?.printFile)
+        documentFiles.push({
+          id: document.id * 1000 + article.id * 2,
+          key: `customer-${document.id}-${article.id}-${documentItem.printFile}`,
+          name: documentItem.printFile,
+          url: documentItem.printFileUrl,
+          source: "Vom Kunden",
+          addedAt,
+          timestamp,
+        });
+      if (documentItem) return documentFiles;
+      if (document.supplierGzd)
+        documentFiles.push({
+          id: document.id * 2 + 1,
+          key: `supplier-${document.id}-${document.supplierGzd}`,
+          name: document.supplierGzd,
+          url: document.supplierGzdUrl,
+          source: "Vom Lieferanten",
+          addedAt,
+          timestamp,
+        });
+      if (document.printFile)
+        documentFiles.push({
+          id: document.id * 2,
+          key: `customer-${document.id}-${document.printFile}`,
+          name: document.printFile,
+          url: document.printFileUrl,
+          source: "Vom Kunden",
+          addedAt,
+          timestamp,
+        });
+      return documentFiles;
+    }),
+  ];
+  return files
+    .sort((left, right) => right.timestamp - left.timestamp)
+    .filter((file, index, sortedFiles) => {
+      const signature = file.url ? `url:${file.url}` : `name:${file.name}`;
+      return (
+        sortedFiles.findIndex((candidate) =>
+          candidate.url
+            ? `url:${candidate.url}` === signature
+            : `name:${candidate.name}` === signature,
+        ) === index
+      );
+    });
 };
 const renderTemplate = (
   template: string,
@@ -506,7 +650,6 @@ const initialSuppliers: Supplier[] = [
     contact: "Julia Keller",
     email: "jkeller@papierwerk-sued.de",
     phone: "+49 761 441 63 10",
-    leadTime: "4 Arbeitstage",
   },
   {
     id: 2,
@@ -516,7 +659,6 @@ const initialSuppliers: Supplier[] = [
     contact: "Andreas Haas",
     email: "a.haas@farbwerk.ch",
     phone: "+41 71 811 24 81",
-    leadTime: "6 Arbeitstage",
   },
   {
     id: 3,
@@ -526,20 +668,20 @@ const initialSuppliers: Supplier[] = [
     contact: "Sarah Winter",
     email: "s.winter@buchbinderei.ch",
     phone: "+41 44 770 15 00",
-    leadTime: "3 Arbeitstage",
   },
 ];
 const initialArticles: Article[] = [
   {
     id: 1,
     sku: "VIS-COB-350",
+    designation1: "Visitenkarten Cobalt",
+    designation2: "350 g",
     name: "Visitenkarten Cobalt · 350 g",
     customerId: 2,
     supplier: "Papierwerk Süd",
     stock: 520,
     minimum: 200,
     unitPrice: 0.22,
-    tierQuantities: [100, 250, 500, 1000, 2000],
     stockHistory: [
       { date: "14.08.2026", change: 520, stock: 520, reason: "Startbestand" },
     ],
@@ -554,13 +696,14 @@ const initialArticles: Article[] = [
   {
     id: 2,
     sku: "FLY-NRD-A5",
+    designation1: "Flyer Studio Nord",
+    designation2: "A5",
     name: "Flyer Studio Nord · A5",
     customerId: 1,
     supplier: "Farbwerk AG",
     stock: 80,
     minimum: 150,
     unitPrice: 0.48,
-    tierQuantities: [100, 250, 500, 1000, 2500],
     stockHistory: [
       { date: "14.08.2026", change: 80, stock: 80, reason: "Startbestand" },
     ],
@@ -571,13 +714,14 @@ const initialArticles: Article[] = [
   {
     id: 3,
     sku: "BCH-RIE-01",
+    designation1: "Lookbook Riedel",
+    designation2: "48 Seiten",
     name: "Lookbook Riedel · 48 Seiten",
     customerId: 3,
     supplier: "Die Buchbinderei",
     stock: 34,
     minimum: 50,
     unitPrice: 8.9,
-    tierQuantities: [25, 50, 100, 250, 500],
     stockHistory: [
       { date: "14.08.2026", change: 34, stock: 34, reason: "Startbestand" },
     ],
@@ -673,9 +817,12 @@ const initialWorkflowSettings: WorkflowSettings = {
     "Guten Tag Lieferant,\n\nBestellung {project} wurde ausgelöst.",
   confirmationTemplate:
     "Guten Tag {customer},\n\nIhre Auftragsbestätigung {project} ist bereit.",
+  employeeLoginSubject: "Ihr Zugang zum Printcenter von {company}",
+  employeeLoginTemplate:
+    "Guten Tag {salutation} {lastName},\n\nIhr persönlicher Zugang zum Kundenportal von {company} ist eingerichtet.\n\nPortal: {portalUrl}\nLogin: {email}\nPasswort: {password}\n\nBitte bewahren Sie diese Zugangsdaten sicher auf.\n\nFreundliche Grüsse\nPrintcenter",
   supplierOfferSubject: "Neue Lieferantenofferte für {project}",
   offerEmail: "angebote@printcenter.ch",
-  orderEmail: "bestellungen@printcenter.ch",
+  orderEmail: "",
   attachRequestDocument: true,
   attachRequestGzd: true,
   attachOfferDocument: true,
@@ -707,7 +854,15 @@ function Status({ children }: { children: string }) {
   );
 }
 
-export default function Home() {
+export function PrintcenterApp({
+  initialRoute,
+  initialPortalNumber,
+  initialSupplierToken,
+}: {
+  initialRoute: EntryRoute;
+  initialPortalNumber?: string;
+  initialSupplierToken?: string;
+}) {
   const [view, setView] = useState<View>("Übersicht");
   const [customers, setCustomers] = useState(initialCustomers);
   const [suppliers, setSuppliers] = useState(initialSuppliers);
@@ -726,14 +881,18 @@ export default function Home() {
   const [documentForm, setDocumentForm] = useState<DocumentType | null>(null);
   const [documentFocusId, setDocumentFocusId] = useState<number | null>(null);
   const [groupName, setGroupName] = useState("");
-  const [notice, setNotice] = useState("");
-  const [importedCount, setImportedCount] = useState(0);
+  const [, setNotice] = useState("");
   const [portalSession, setPortalSession] = useState<{
     customerId: number;
     employeeId: number;
+    source: "customer" | "backend-preview";
   } | null>(null);
-  const [portalRoute, setPortalRoute] = useState<string | null>(null);
-  const [supplierRoute, setSupplierRoute] = useState<string | null>(null);
+  const [portalRoute, setPortalRoute] = useState<string | null>(
+    initialRoute === "customer" ? (initialPortalNumber ?? null) : null,
+  );
+  const [supplierRoute, setSupplierRoute] = useState<string | null>(
+    initialRoute === "supplier" ? (initialSupplierToken ?? null) : null,
+  );
   const [backendUsers, setBackendUsers] = useState(initialBackendUsers);
   const [backendSession, setBackendSession] = useState<BackendUser | null>(
     null,
@@ -776,14 +935,15 @@ export default function Home() {
     let active = true;
     void apiRequest<PersistedState>("/api/state")
       .then(async (stored) => {
+        const normalizedStoredArticles = stored.articles.map(normalizeArticle);
         const hasOriginalDemoDirectory = initialCustomers.every(
           (demoCustomer) =>
             stored.customers.some(
               (customer) => customer.number === demoCustomer.number,
             ),
         );
-        const bootstrapArticles = stored.articles.length
-          ? stored.articles
+        const bootstrapArticles = normalizedStoredArticles.length
+          ? normalizedStoredArticles
           : hasOriginalDemoDirectory
             ? initialArticles
             : [];
@@ -807,11 +967,13 @@ export default function Home() {
               customers: stored.customers,
               suppliers: stored.suppliers,
               groups: stored.groups,
-              articles: stored.articles,
+              articles: normalizedStoredArticles,
               documents: stored.documents,
               backendUsers: stored.backendUsers,
-              workflowSettings:
-                stored.workflowSettings ?? initialWorkflowSettings,
+              workflowSettings: {
+                ...initialWorkflowSettings,
+                ...(stored.workflowSettings ?? {}),
+              },
             }
           : {
               customers: stored.customers,
@@ -822,8 +984,10 @@ export default function Home() {
               backendUsers: stored.backendUsers.length
                 ? stored.backendUsers
                 : initialBackendUsers,
-              workflowSettings:
-                stored.workflowSettings ?? initialWorkflowSettings,
+              workflowSettings: {
+                ...initialWorkflowSettings,
+                ...(stored.workflowSettings ?? {}),
+              },
             };
         if (!stored.initialized)
           await apiRequest<{ ok: boolean }>("/api/state", {
@@ -887,6 +1051,71 @@ export default function Home() {
     backendUsers,
     workflowSettings,
   ]);
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (!databaseReady) return;
+    try {
+      if (initialRoute === "backend" && !backendSession) {
+        const storedBackend = window.localStorage.getItem(
+          backendSessionStorageKey,
+        );
+        if (storedBackend) {
+          const { userId } = JSON.parse(storedBackend) as { userId?: number };
+          const account = backendUsers.find(
+            (user) => user.id === userId && user.active,
+          );
+          if (account) setBackendSession(account);
+          else window.localStorage.removeItem(backendSessionStorageKey);
+        }
+      }
+      if (
+        initialRoute !== "backend" &&
+        initialRoute !== "supplier" &&
+        !portalSession
+      ) {
+        const storedCustomer = window.localStorage.getItem(
+          customerSessionStorageKey,
+        );
+        if (storedCustomer) {
+          const { customerId, employeeId } = JSON.parse(storedCustomer) as {
+            customerId?: number;
+            employeeId?: number;
+          };
+          const customer = customers.find((item) => item.id === customerId);
+          const employee = customer?.employees.find(
+            (item) => item.id === employeeId,
+          );
+          const routeMatches =
+            initialRoute !== "customer" ||
+            !initialPortalNumber ||
+            customer?.number.toLowerCase() ===
+              initialPortalNumber.toLowerCase();
+          if (customer && employee && routeMatches) {
+            setPortalRoute(customer.number);
+            setPortalSession({
+              customerId: customer.id,
+              employeeId: employee.id,
+              source: "customer",
+            });
+          } else if (!customer || !employee) {
+            window.localStorage.removeItem(customerSessionStorageKey);
+          }
+        }
+      }
+    } catch {
+      window.localStorage.removeItem(backendSessionStorageKey);
+      window.localStorage.removeItem(customerSessionStorageKey);
+    }
+  }, [
+    backendSession,
+    backendUsers,
+    customers,
+    databaseReady,
+    initialPortalNumber,
+    initialRoute,
+    portalSession,
+  ]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   async function saveCustomer(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1117,6 +1346,12 @@ export default function Home() {
       );
     }
   }
+  async function sendEmployeeLogin(customerId: number, employeeId: number) {
+    await apiRequest<{ ok: boolean }>(
+      `/api/customers/${customerId}/employees/${employeeId}/send-login`,
+      { method: "POST", body: JSON.stringify({}) },
+    );
+  }
   function updateArticleMinimum(articleId: number, minimum: number) {
     setArticles((current) =>
       current.map((article) =>
@@ -1138,7 +1373,6 @@ export default function Home() {
       contact: String(data.get("contact") || ""),
       email: String(data.get("email") || ""),
       phone: String(data.get("phone") || ""),
-      leadTime: String(data.get("leadTime") || "auf Anfrage"),
     };
     try {
       if (typeof supplierForm === "number") {
@@ -1250,27 +1484,28 @@ export default function Home() {
   function saveArticle(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    const name = String(data.get("name") || "").trim();
-    if (!name) return;
+    const designation1 = String(data.get("designation1") || "").trim();
+    const designation2 = String(data.get("designation2") || "").trim();
+    const name = articleNameFromDesignations(designation1, designation2);
+    if (!designation1) return;
+    const articleId = Number(data.get("articleId") || 0);
     const customerValue = String(data.get("customerId") || "");
-    const tierQuantities = [1, 2, 3, 4, 5]
-      .map((index) => Number(data.get(`tier${index}`) || 0))
-      .filter((quantity) => quantity > 0);
     const enteredSku = String(data.get("sku") || "").trim();
     const draft = {
       sku: enteredSku || `ART-${String(Date.now()).slice(-6)}`,
+      designation1,
+      designation2,
       name,
       customerId: customerValue ? Number(customerValue) : undefined,
       supplier: String(data.get("supplier") || "Nicht zugeordnet"),
       stock: Number(data.get("stock") || 0),
       minimum: Number(data.get("minimum") || 0),
       unitPrice: Number(data.get("unitPrice") || 0),
-      tierQuantities,
     };
-    if (typeof articleForm === "number") {
+    if (articleId > 0) {
       setArticles((current) =>
         current.map((article) => {
-          if (article.id !== articleForm) return article;
+          if (article.id !== articleId) return article;
           const stockHistory =
             article.stock === draft.stock
               ? article.stockHistory
@@ -1311,66 +1546,6 @@ export default function Home() {
   function deleteArticle(article: Article) {
     setArticles((current) => current.filter((item) => item.id !== article.id));
     setNotice(`${article.name} wurde gelöscht.`);
-  }
-  async function importCsv(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    const text = await file.text();
-    const rows = text.split(/\r?\n/).filter(Boolean);
-    const firstLineLooksLikeHeader = /artikel|name|sku|nummer/i.test(
-      rows[0] || "",
-    );
-    const imported = rows
-      .slice(firstLineLooksLikeHeader ? 1 : 0)
-      .map((row, index) => {
-        const [
-          sku = "",
-          name = `Importierter Artikel ${index + 1}`,
-          customer = "",
-          supplier = "Nicht zugeordnet",
-          stock = "0",
-          unitPrice = "0",
-          minimum = "0",
-          ...tiers
-        ] = row.split(/[;,]/).map((value) => value.trim());
-        const matchedCustomer = customers.find(
-          (item) => item.name.toLowerCase() === customer.toLowerCase(),
-        );
-        const tierQuantities = tiers
-          .slice(0, 5)
-          .map(Number)
-          .filter((quantity) => quantity > 0);
-        const importedStock = Number(stock) || 0;
-        return {
-          id: Date.now() + index,
-          sku: sku || `IMP-${String(Date.now()).slice(-6)}-${index + 1}`,
-          name,
-          customerId: matchedCustomer?.id,
-          supplier: supplier || "Nicht zugeordnet",
-          stock: importedStock,
-          minimum: Number(minimum) || 0,
-          unitPrice: Number(unitPrice) || 0,
-          tierQuantities,
-          stockHistory: [
-            {
-              date: today(),
-              change: importedStock,
-              stock: importedStock,
-              reason: "CSV-Import",
-            },
-          ],
-          templates: [],
-        };
-      })
-      .filter((article) => article.name);
-    if (imported.length) {
-      setArticles((current) => [...imported, ...current]);
-      setImportedCount(imported.length);
-      setNotice(
-        `${imported.length} Artikel wurden aus ${file.name} importiert.`,
-      );
-    }
-    event.target.value = "";
   }
   async function attachTemplate(
     event: ChangeEvent<HTMLInputElement>,
@@ -1479,7 +1654,7 @@ export default function Home() {
       `${next.type} ${next.number} wurde für ${customer.name} angelegt.`,
     );
   }
-  function createCustomerRequest(data: {
+  async function createCustomerRequest(data: {
     customerId: number;
     employeeId: number;
     articleId: number;
@@ -1498,11 +1673,6 @@ export default function Home() {
       ? article.supplier.slice(6)
       : undefined;
     const supplier = suppliers.find((item) => item.name === article?.supplier);
-    const recipients = groupName
-      ? suppliers.filter((item) => item.group === groupName)
-      : supplier
-        ? [supplier]
-        : [];
     if (!customer || !employee || !article) return;
     const requestedQuantities = data.quantities
       .map(Number)
@@ -1564,26 +1734,219 @@ export default function Home() {
       status: "Versendet",
     };
     setDocuments((current) => [next, ...current]);
-    const subject = renderTemplate(workflowSettings.supplierOfferSubject, {
+    try {
+      const result = await apiRequest<{
+        ok: boolean;
+        sent: number;
+        failed: number;
+        attachmentCount: number;
+        warning?: string;
+        message: string;
+      }>("/api/request-emails", {
+        method: "POST",
+        body: JSON.stringify({
+          customerId: customer.id,
+          employeeId: employee.id,
+          articleId: article.id,
+          number: next.number,
+          projectId: next.projectId,
+          supplierToken,
+          quantities: requestedQuantities,
+          deliveryDate: data.deliveryDate,
+          note: data.note,
+          printFile: data.printFile,
+          printFileUrl: data.printFileUrl,
+        }),
+      });
+      const message = [result.message, result.warning].filter(Boolean).join(" ");
+      setNotice(`Anfrage ${next.number}: ${message}`);
+      window.dispatchEvent(
+        new CustomEvent("printcenter:request-mail-status", {
+          detail: { status: "sent", message },
+        }),
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Die Lieferantenmail konnte nicht versendet werden.";
+      setNotice(
+        `Anfrage ${next.number} wurde erstellt, aber die Lieferantenmail ist fehlgeschlagen: ${message}`,
+      );
+      window.dispatchEvent(
+        new CustomEvent("printcenter:request-mail-status", {
+          detail: { status: "error", message },
+        }),
+      );
+    }
+  }
+  async function createCollectiveCustomerRequest(data: {
+    customerId: number;
+    employeeId: number;
+    supplier: string;
+    items: Array<{
+      articleId: number;
+      quantities: number[];
+      printFile?: string;
+      printFileUrl?: string;
+    }>;
+    deliveryDate: string;
+    note: string;
+  }) {
+    const customer = customers.find((item) => item.id === data.customerId);
+    const employee = customer?.employees.find(
+      (item) => item.id === data.employeeId,
+    );
+    const selectedArticles = data.items
+      .map((item) => ({
+        input: item,
+        article: articles.find((article) => article.id === item.articleId),
+      }))
+      .filter(
+        (entry): entry is { input: (typeof data.items)[number]; article: Article } =>
+          Boolean(entry.article),
+      );
+    if (
+      !customer ||
+      !employee ||
+      !selectedArticles.length ||
+      selectedArticles.some(
+        ({ article }) =>
+          article.customerId !== customer.id || article.supplier !== data.supplier,
+      )
+    )
+      return;
+    const items: DocumentItem[] = selectedArticles.map(({ input, article }) => {
+      const requestedQuantities = input.quantities
+        .map(Number)
+        .filter((quantity) => quantity > 0)
+        .slice(0, 5);
+      return {
+        articleId: article.id,
+        sku: article.sku,
+        article: article.name,
+        quantity: requestedQuantities[0],
+        requestedQuantities,
+        unitPrice: 0,
+        subtotal: 0,
+        markupAmount: 0,
+        total: 0,
+        printFile: input.printFile,
+        printFileUrl: input.printFileUrl,
+      };
+    });
+    if (items.some((item) => !item.requestedQuantities?.length)) return;
+    const groupName = data.supplier.startsWith("group:")
+      ? data.supplier.slice(6)
+      : undefined;
+    const supplier = suppliers.find((item) => item.name === data.supplier);
+    const targetLabel = groupName
+      ? `Lieferantengruppe · ${groupName}`
+      : supplier?.name || data.supplier;
+    const id = Date.now();
+    const number = `AF-2026-${String(documents.length + 113).padStart(3, "0")}`;
+    const supplierToken = `SUP-${id}`;
+    const requestWorkflow = workflowForDocument("Anfrage", workflowSettings);
+    const requestText = renderTemplate(workflowSettings.requestTemplate, {
       supplier: targetLabel,
       customer: customer.name,
-      article: article.name,
-      quantity: quantitiesText,
-      quantities: quantitiesText,
-      project: next.projectId ?? next.id,
+      quantity: `${items.length} Artikel`,
+      quantities: `${items.length} Artikel mit individuellen Staffelgrössen`,
+      article: `Sammelanfrage mit ${items.length} Artikeln`,
+      deliveryDate: data.deliveryDate,
+      note: data.note || "Keine Bemerkung",
+      project: number,
     });
-    setNotice(
-      `Anfrage ${next.number} mit ${requestedQuantities.length} Staffelgrössen wurde als PDF an ${
-        recipients
-          .map((item) => item.email)
-          .filter(Boolean)
-          .join(", ") || targetLabel
-      } vorbereitet. Betreff: ${subject} · Lieferantenlink: /supplier-offer/${supplierToken}`,
-    );
+    const first = items[0];
+    const next: DocumentRecord = {
+      id,
+      number,
+      type: "Anfrage",
+      customerId: customer.id,
+      customer: customer.name,
+      employeeId: employee.id,
+      employee: employee.name,
+      supplier: targetLabel,
+      supplierId: supplier?.id,
+      supplierToken,
+      projectId: id,
+      articleId: first.articleId,
+      article: `Sammelanfrage · ${items.length} Artikel`,
+      quantity: first.quantity,
+      requestedQuantities: first.requestedQuantities,
+      unitPrice: 0,
+      subtotal: 0,
+      markupPercent: customer.markup,
+      markupAmount: 0,
+      total: 0,
+      date: today(),
+      createdAt: new Date().toISOString(),
+      deliveryDate: data.deliveryDate,
+      note: data.note,
+      requestText,
+      documentText: requestText,
+      attachDocument: requestWorkflow.attachDocument,
+      attachGzd: requestWorkflow.attachGzd,
+      items,
+      status: "Versendet",
+    };
+    setDocuments((current) => [next, ...current]);
+    try {
+      const result = await apiRequest<{
+        ok: boolean;
+        sent: number;
+        failed: number;
+        warning?: string;
+        message: string;
+      }>("/api/collective-request-emails", {
+        method: "POST",
+        body: JSON.stringify({
+          customerId: customer.id,
+          employeeId: employee.id,
+          number,
+          projectId: id,
+          supplierToken,
+          deliveryDate: data.deliveryDate,
+          note: data.note,
+          items: items.map((item) => ({
+            articleId: item.articleId,
+            quantities: item.requestedQuantities,
+            printFile: item.printFile,
+            printFileUrl: item.printFileUrl,
+          })),
+        }),
+      });
+      const message = [result.message, result.warning].filter(Boolean).join(" ");
+      setNotice(`Sammelanfrage ${number}: ${message}`);
+      window.dispatchEvent(
+        new CustomEvent("printcenter:request-mail-status", {
+          detail: { status: "sent", message },
+        }),
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Die Lieferantenmail konnte nicht versendet werden.";
+      setNotice(
+        `Sammelanfrage ${number} wurde erstellt, aber die Lieferantenmail ist fehlgeschlagen: ${message}`,
+      );
+      window.dispatchEvent(
+        new CustomEvent("printcenter:request-mail-status", {
+          detail: { status: "error", message },
+        }),
+      );
+    }
   }
-  function submitSupplierOffer(data: {
+  async function submitSupplierOffer(data: {
     requestId: number;
-    options: OfferOption[];
+    options?: OfferOption[];
+    items?: Array<{
+      articleId: number;
+      options: OfferOption[];
+      gzd?: string;
+      gzdUrl?: string;
+    }>;
     deliveryDate: string;
     deliveryNote?: string;
     gzd?: string;
@@ -1593,22 +1956,86 @@ export default function Home() {
     const request = documents.find(
       (item) => item.id === data.requestId && item.type === "Anfrage",
     );
-    if (!request || !data.options.length || !data.deliveryDate) return;
-    const first = data.options[0];
+    const collective = Boolean(request?.items?.length);
+    if (
+      !request ||
+      !data.deliveryDate ||
+      (collective
+        ? !data.items?.length
+        : !data.options?.length)
+    ) {
+      window.dispatchEvent(
+        new CustomEvent("printcenter:supplier-offer-result", {
+          detail: {
+            status: "error",
+            message: "Die Angebotsdaten sind unvollständig.",
+          },
+        }),
+      );
+      return;
+    }
     const customer = customers.find((item) => item.id === request.customerId);
-    if (!customer) return;
-    const employee = customer.employees.find(
-      (item) => item.id === request.employeeId,
+    if (!customer) {
+      window.dispatchEvent(
+        new CustomEvent("printcenter:supplier-offer-result", {
+          detail: {
+            status: "error",
+            message: "Der Kunde der Anfrage wurde nicht gefunden.",
+          },
+        }),
+      );
+      return;
+    }
+    if (
+      request.items?.some(
+        (requestItem) =>
+          !data.items?.find((item) => item.articleId === requestItem.articleId)
+            ?.options.length,
+      )
+    ) {
+      window.dispatchEvent(
+        new CustomEvent("printcenter:supplier-offer-result", {
+          detail: {
+            status: "error",
+            message: "Bei mindestens einem Artikel fehlen die Staffelpreise.",
+          },
+        }),
+      );
+      return;
+    }
+    const offerItems: DocumentItem[] | undefined = request.items?.map(
+      (requestItem) => {
+        const submittedItem = data.items!.find(
+          (item) => item.articleId === requestItem.articleId,
+        )!;
+        const firstOption = submittedItem.options[0];
+        const itemSubtotal = supplierTotalForOption(firstOption);
+        const itemMarkupAmount = (itemSubtotal * customer.markup) / 100;
+        return {
+          ...requestItem,
+          quantity: firstOption.quantity,
+          unitPrice: firstOption.unitPrice,
+          subtotal: itemSubtotal,
+          markupAmount: itemMarkupAmount,
+          total: itemSubtotal + itemMarkupAmount,
+          supplierGzd: submittedItem.gzd,
+          supplierGzdUrl:
+            submittedItem.gzdUrl ||
+            (submittedItem.gzd === requestItem.printFile
+              ? requestItem.printFileUrl
+              : submittedItem.gzd
+                ? storedFileUrls.get(submittedItem.gzd)
+                : undefined),
+          gzdStatus: submittedItem.gzd ? "In Prüfung" : undefined,
+          offerOptions: submittedItem.options,
+        };
+      },
     );
-    const mailRecipients = Array.from(
-      new Set(
-        [
-          employee?.email,
-          employee?.mailToMain ? customer.email : undefined,
-        ].filter((email): email is string => Boolean(email)),
-      ),
-    );
-    const subtotal = supplierTotalForOption(first);
+    const first = offerItems?.[0]?.offerOptions?.[0] ?? data.options?.[0];
+    if (!first) return;
+    const subtotal = offerItems?.length
+      ? offerItems.reduce((sum, item) => sum + item.subtotal, 0)
+      : supplierTotalForOption(first);
     const markupAmount = (subtotal * customer.markup) / 100;
     const id = Date.now();
     const number = `AN-2026-${String(documents.length + 113).padStart(3, "0")}`;
@@ -1616,7 +2043,9 @@ export default function Home() {
     const documentText = renderTemplate(offerWorkflow.template, {
       supplier: request.supplier ?? "Lieferant",
       customer: customer.name,
-      article: request.article,
+      article: collective
+        ? `Sammelofferte mit ${offerItems?.length ?? 0} Artikeln`
+        : request.article,
       quantity: first.quantity,
       deliveryDate: data.deliveryDate,
       note: data.deliveryNote ?? data.note ?? request.note ?? "",
@@ -1654,9 +2083,42 @@ export default function Home() {
       supplierGzdUrl,
       supplierNote: data.note,
       gzdStatus: data.gzd ? "In Prüfung" : undefined,
-      offerOptions: data.options,
+      offerOptions: collective ? undefined : data.options,
+      items: offerItems,
       status: "Offen",
     };
+    let mailMessage = "";
+    let mailError = "";
+    try {
+      const result = await apiRequest<{
+        ok: boolean;
+        sent: number;
+        failed: number;
+        attachmentCount: number;
+        warning?: string;
+        message: string;
+      }>(collective ? "/api/collective-offer-emails" : "/api/offer-emails", {
+        method: "POST",
+        body: JSON.stringify({
+          requestId: request.id,
+          supplierToken: request.supplierToken,
+          offerNumber: offer.number,
+          options: data.options,
+          items: data.items,
+          deliveryDate: data.deliveryDate,
+          deliveryNote: data.deliveryNote,
+          gzd: data.gzd,
+          gzdUrl: supplierGzdUrl,
+          note: data.note,
+        }),
+      });
+      mailMessage = [result.message, result.warning].filter(Boolean).join(" ");
+    } catch (error) {
+      mailError =
+        error instanceof Error
+          ? error.message
+          : "Die Angebotsmail konnte nicht versendet werden.";
+    }
     setDocuments((current) => [
       offer,
       ...current.map((item) =>
@@ -1665,13 +2127,22 @@ export default function Home() {
           : item,
       ),
     ]);
-    setSupplierRoute(null);
-    window.history.pushState({}, "", "/");
     setNotice(
-      `Angebot ${offer.number} wurde an ${mailRecipients.join(", ") || customer.email} versendet (Versandprofil: ${workflowSettings.offerEmail}).`,
+      mailError
+        ? `Angebot ${offer.number} wurde gespeichert, aber die Kundenmail ist fehlgeschlagen: ${mailError}`
+        : `Angebot ${offer.number}: ${mailMessage}`,
+    );
+    window.dispatchEvent(
+      new CustomEvent("printcenter:supplier-offer-result", {
+        detail: { status: "success", offerNumber: offer.number },
+      }),
     );
   }
-  function acceptOffer(offerId: number, quantity: number) {
+  async function acceptOffer(
+    offerId: number,
+    quantity: number,
+    itemQuantities?: Record<string, number>,
+  ) {
     const offer = documents.find(
       (item) => item.id === offerId && item.type === "Angebot",
     );
@@ -1679,8 +2150,34 @@ export default function Home() {
     const option = offer.offerOptions?.find(
       (item) => item.quantity === quantity,
     ) ?? { quantity, unitPrice: offer.unitPrice };
-    const orderSubtotal = supplierTotalForOption(option);
-    const customerTotal = customerTotalForOption(option, offer.markupPercent);
+    const selectedItems = offer.items?.map((item) => {
+      const selectedQuantity = itemQuantities?.[String(item.articleId)] ?? item.quantity;
+      const selectedOption =
+        item.offerOptions?.find(
+          (offerOption) => offerOption.quantity === selectedQuantity,
+        ) ?? {
+          quantity: selectedQuantity,
+          unitPrice: item.unitPrice,
+          supplierTotal: item.subtotal,
+        };
+      const itemSubtotal = supplierTotalForOption(selectedOption);
+      const itemCustomerTotal = customerTotalForOption(
+        selectedOption,
+        offer.markupPercent,
+      );
+      return {
+        source: item,
+        option: selectedOption,
+        subtotal: itemSubtotal,
+        customerTotal: itemCustomerTotal,
+      };
+    });
+    const orderSubtotal = selectedItems?.length
+      ? selectedItems.reduce((sum, item) => sum + item.subtotal, 0)
+      : supplierTotalForOption(option);
+    const customerTotal = selectedItems?.length
+      ? selectedItems.reduce((sum, item) => sum + item.customerTotal, 0)
+      : customerTotalForOption(option, offer.markupPercent);
     const orderId = Date.now();
     const confirmationId = orderId + 1;
     const orderNumber = `BE-2026-${String(documents.length + 113).padStart(3, "0")}`;
@@ -1697,20 +2194,34 @@ export default function Home() {
       supplier: offer.supplier ?? "Lieferant",
       customer: offer.customer,
       article: offer.article,
-      quantity: option.quantity,
+      quantity: selectedItems?.length
+        ? `${selectedItems.length} Artikel`
+        : option.quantity,
       deliveryDate:
         offer.supplierDeliveryDate ?? offer.deliveryDate ?? "auf Anfrage",
       note: offer.supplierDeliveryNote ?? offer.supplierNote ?? "",
       project: offer.projectId ?? offer.id,
       total: orderSubtotal,
     });
+    const orderItems: DocumentItem[] | undefined = selectedItems?.map(
+      ({ source, option: selectedOption, subtotal: itemSubtotal }) => ({
+        ...source,
+        quantity: selectedOption.quantity,
+        unitPrice: selectedOption.unitPrice,
+        subtotal: itemSubtotal,
+        markupAmount: 0,
+        total: itemSubtotal,
+        requestedQuantities: undefined,
+        offerOptions: undefined,
+      }),
+    );
     const order: DocumentRecord = {
       ...offer,
       id: orderId,
       number: orderNumber,
       type: "Bestellung",
-      quantity: option.quantity,
-      unitPrice: option.unitPrice,
+      quantity: orderItems?.[0]?.quantity ?? option.quantity,
+      unitPrice: orderItems?.[0]?.unitPrice ?? option.unitPrice,
       subtotal: orderSubtotal,
       markupPercent: 0,
       markupAmount: 0,
@@ -1725,13 +2236,17 @@ export default function Home() {
         .join("\n\n"),
       attachDocument: orderWorkflow.attachDocument,
       attachGzd: orderWorkflow.attachGzd,
+      offerOptions: selectedItems?.length ? undefined : offer.offerOptions,
+      items: orderItems,
       status: "Versendet",
     };
     const confirmationText = renderTemplate(confirmationWorkflow.template, {
       supplier: offer.supplier ?? "Lieferant",
       customer: offer.customer,
       article: offer.article,
-      quantity: option.quantity,
+      quantity: selectedItems?.length
+        ? `${selectedItems.length} Artikel`
+        : option.quantity,
       deliveryDate:
         offer.supplierDeliveryDate ?? offer.deliveryDate ?? "auf Anfrage",
       note: offer.supplierDeliveryNote ?? offer.supplierNote ?? "",
@@ -1740,13 +2255,25 @@ export default function Home() {
       date: today(),
       createdAt: new Date(confirmationId).toISOString(),
     });
+    const confirmationItems: DocumentItem[] | undefined = selectedItems?.map(
+      ({ source, option: selectedOption, subtotal: itemSubtotal, customerTotal: itemTotal }) => ({
+        ...source,
+        quantity: selectedOption.quantity,
+        unitPrice: selectedOption.unitPrice,
+        subtotal: itemSubtotal,
+        markupAmount: itemTotal - itemSubtotal,
+        total: itemTotal,
+        requestedQuantities: undefined,
+        offerOptions: undefined,
+      }),
+    );
     const confirmation: DocumentRecord = {
       ...offer,
       id: confirmationId,
       number: confirmationNumber,
       type: "Auftragsbestätigung",
-      quantity: option.quantity,
-      unitPrice: option.unitPrice,
+      quantity: confirmationItems?.[0]?.quantity ?? option.quantity,
+      unitPrice: confirmationItems?.[0]?.unitPrice ?? option.unitPrice,
       subtotal: orderSubtotal,
       markupPercent: offer.markupPercent,
       markupAmount: customerTotal - orderSubtotal,
@@ -1758,6 +2285,8 @@ export default function Home() {
         .join("\n\n"),
       attachDocument: confirmationWorkflow.attachDocument,
       attachGzd: confirmationWorkflow.attachGzd,
+      offerOptions: selectedItems?.length ? undefined : offer.offerOptions,
+      items: confirmationItems,
       status: "Bestätigt",
     };
     setDocuments((current) => [
@@ -1769,9 +2298,27 @@ export default function Home() {
           : item,
       ),
     ]);
-    setNotice(
-      `Bestellung ${order.number} wurde versendet und Auftragsbestätigung ${confirmation.number} sofort für das Kundenportal erzeugt. Lieferdatum: ${offer.supplierDeliveryDate ?? "auf Anfrage"}.`,
-    );
+    try {
+      const result = await apiRequest<{ ok: boolean; message: string }>(
+        "/api/order-emails",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            offerId: offer.id,
+            orderNumber: order.number,
+            quantity,
+            itemQuantities,
+          }),
+        },
+      );
+      setNotice(
+        `Bestellung ${order.number} wurde intern gemeldet und Auftragsbestätigung ${confirmation.number} erzeugt. ${result.message}`,
+      );
+    } catch (error) {
+      setNotice(
+        `Bestellung ${order.number} und Auftragsbestätigung ${confirmation.number} wurden erzeugt, aber die interne Bestellmail ist fehlgeschlagen: ${error instanceof Error ? error.message : "Unbekannter Fehler"}`,
+      );
+    }
   }
   function rejectOffer(offerId: number) {
     const offer = documents.find(
@@ -1880,7 +2427,7 @@ export default function Home() {
   }, [documents]);
   useEffect(() => {
     const onRequest = (event: Event) =>
-      createCustomerRequest(
+      void createCustomerRequest(
         (
           event as CustomEvent<{
             customerId: number;
@@ -1891,6 +2438,24 @@ export default function Home() {
             note: string;
             printFile?: string;
             printFileUrl?: string;
+          }>
+        ).detail,
+      );
+    const onCollectiveRequest = (event: Event) =>
+      void createCollectiveCustomerRequest(
+        (
+          event as CustomEvent<{
+            customerId: number;
+            employeeId: number;
+            supplier: string;
+            items: Array<{
+              articleId: number;
+              quantities: number[];
+              printFile?: string;
+              printFileUrl?: string;
+            }>;
+            deliveryDate: string;
+            note: string;
           }>
         ).detail,
       );
@@ -1916,11 +2481,17 @@ export default function Home() {
       if (document) deleteDocument(document);
     };
     const onSupplierOffer = (event: Event) =>
-      submitSupplierOffer(
+      void submitSupplierOffer(
         (
           event as CustomEvent<{
             requestId: number;
-            options: OfferOption[];
+            options?: OfferOption[];
+            items?: Array<{
+              articleId: number;
+              options: OfferOption[];
+              gzd?: string;
+              gzdUrl?: string;
+            }>;
             deliveryDate: string;
             deliveryNote?: string;
             gzd?: string;
@@ -1931,9 +2502,17 @@ export default function Home() {
       );
     const onAccept = (event: Event) => {
       const detail = (
-        event as CustomEvent<{ offerId: number; quantity: number }>
+        event as CustomEvent<{
+          offerId: number;
+          quantity: number;
+          itemQuantities?: Record<string, number>;
+        }>
       ).detail;
-      acceptOffer(detail.offerId, detail.quantity);
+      void acceptOffer(
+        detail.offerId,
+        detail.quantity,
+        detail.itemQuantities,
+      );
     };
     const onReject = (event: Event) =>
       rejectOffer((event as CustomEvent<{ offerId: number }>).detail.offerId);
@@ -1943,19 +2522,36 @@ export default function Home() {
       window.history.pushState({}, "", `/supplier-offer/${token}`);
     };
     const onGzdStatus = (event: Event) => {
-      const { documentId, status } = (
-        event as CustomEvent<{ documentId: number; status: GzdStatus }>
+      const { documentId, articleId, status } = (
+        event as CustomEvent<{
+          documentId: number;
+          articleId?: number;
+          status: GzdStatus;
+        }>
       ).detail;
       setDocuments((current) =>
         current.map((document) =>
           document.id === documentId
-            ? { ...document, gzdStatus: status, pdfUrl: undefined }
+            ? articleId
+              ? {
+                  ...document,
+                  items: document.items?.map((item) =>
+                    item.articleId === articleId
+                      ? { ...item, gzdStatus: status }
+                      : item,
+                  ),
+                  pdfUrl: undefined,
+                }
+              : { ...document, gzdStatus: status, pdfUrl: undefined }
             : document,
         ),
       );
-      setNotice(`GzD-Status wurde auf „${status}“ gesetzt.`);
     };
     window.addEventListener("printcenter:request", onRequest);
+    window.addEventListener(
+      "printcenter:collective-request",
+      onCollectiveRequest,
+    );
     window.addEventListener("printcenter:document-edit", onEdit);
     window.addEventListener("printcenter:document-delete", onDelete);
     window.addEventListener("printcenter:supplier-offer", onSupplierOffer);
@@ -1965,6 +2561,10 @@ export default function Home() {
     window.addEventListener("printcenter:gzd-status", onGzdStatus);
     return () => {
       window.removeEventListener("printcenter:request", onRequest);
+      window.removeEventListener(
+        "printcenter:collective-request",
+        onCollectiveRequest,
+      );
       window.removeEventListener("printcenter:document-edit", onEdit);
       window.removeEventListener("printcenter:document-delete", onDelete);
       window.removeEventListener("printcenter:supplier-offer", onSupplierOffer);
@@ -1977,12 +2577,32 @@ export default function Home() {
   }, [customers, articles, documents]);
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
-    const match = window.location.pathname.match(/^\/([^/]+)$/);
-    const supplierMatch = window.location.pathname.match(
-      /^\/supplier-offer\/([^/]+)/,
-    );
-    setPortalRoute(match?.[1] ?? null);
-    setSupplierRoute(supplierMatch?.[1] ?? null);
+    const previewToken = new URLSearchParams(
+      window.location.hash.replace(/^#/, ""),
+    ).get("portal-preview");
+    if (previewToken) {
+      const storageKey = `printcenter:portal-preview:${previewToken}`;
+      const storedPreview = window.localStorage.getItem(storageKey);
+      window.localStorage.removeItem(storageKey);
+      window.history.replaceState({}, "", window.location.pathname);
+      if (storedPreview) {
+        try {
+          const preview = JSON.parse(storedPreview) as {
+            customerId: number;
+            employeeId: number;
+            expiresAt: number;
+          };
+          if (preview.expiresAt > Date.now())
+            setPortalSession({
+              customerId: preview.customerId,
+              employeeId: preview.employeeId,
+              source: "backend-preview",
+            });
+        } catch {
+          // Ungültige oder abgelaufene Vorschau-Tokens werden still verworfen.
+        }
+      }
+    }
   }, []);
   /* eslint-enable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -2002,12 +2622,96 @@ export default function Home() {
     );
     if (!account) return false;
     setBackendSession(account);
+    try {
+      window.localStorage.setItem(
+        backendSessionStorageKey,
+        JSON.stringify({ userId: account.id }),
+      );
+    } catch {
+      // Die Anmeldung funktioniert auch, wenn der Browser Speicher blockiert.
+    }
     return true;
   }
+  function startCustomerSession(customer: Customer, employee: Employee) {
+    setPortalRoute(customer.number);
+    setPortalSession({
+      customerId: customer.id,
+      employeeId: employee.id,
+      source: "customer",
+    });
+    try {
+      window.localStorage.setItem(
+        customerSessionStorageKey,
+        JSON.stringify({ customerId: customer.id, employeeId: employee.id }),
+      );
+    } catch {
+      // Die Anmeldung funktioniert auch, wenn der Browser Speicher blockiert.
+    }
+    window.history.replaceState({}, "", `/${customer.number}`);
+  }
+  function signInCustomer(
+    customerNumber: string,
+    email: string,
+    password: string,
+  ) {
+    const normalizedNumber = customerNumber.trim().toLocaleLowerCase("de-CH");
+    const normalizedEmail = email.trim().toLocaleLowerCase("de-CH");
+    const customer = customers.find(
+      (item) => item.number.toLocaleLowerCase("de-CH") === normalizedNumber,
+    );
+    const employee = customer?.employees.find(
+      (item) => item.email.toLocaleLowerCase("de-CH") === normalizedEmail,
+    );
+    if (
+      !customer ||
+      !employee ||
+      password !== (employee.password ?? "portal")
+    )
+      return false;
+    startCustomerSession(customer, employee);
+    return true;
+  }
+  function openPortalPreview(customerId: number, employee: Employee) {
+    const customer = customers.find((item) => item.id === customerId);
+    if (!customer) return;
+    const token = crypto.randomUUID();
+    window.localStorage.setItem(
+      `printcenter:portal-preview:${token}`,
+      JSON.stringify({
+        customerId,
+        employeeId: employee.id,
+        expiresAt: Date.now() + 60_000,
+      }),
+    );
+    window.setTimeout(
+      () =>
+        window.localStorage.removeItem(
+          `printcenter:portal-preview:${token}`,
+        ),
+      60_000,
+    );
+    window.open(
+      `/${customer.number}#portal-preview=${encodeURIComponent(token)}`,
+      "_blank",
+      "noopener,noreferrer",
+    );
+  }
   function leavePortal() {
-    window.history.pushState({}, "", "/");
-    setPortalRoute(null);
+    const customer = customers.find(
+      (item) => item.id === portalSession?.customerId,
+    );
+    const customerPath = customer ? `/${customer.number}` : "/";
+    const wasBackendPreview = portalSession?.source === "backend-preview";
+    if (!wasBackendPreview)
+      try {
+        window.localStorage.removeItem(customerSessionStorageKey);
+      } catch {
+        // Abmelden bleibt auch ohne verfügbaren Browser-Speicher möglich.
+      }
     setPortalSession(null);
+    setPortalRoute(customer?.number ?? null);
+    window.history.replaceState({}, "", customerPath);
+    if (wasBackendPreview) window.close();
   }
   function leaveSupplierPortal() {
     window.history.pushState({}, "", "/");
@@ -2094,12 +2798,7 @@ export default function Home() {
     return (
       <PortalLogin
         customer={portalCustomer}
-        onLogin={(employee) =>
-          setPortalSession({
-            customerId: portalCustomer.id,
-            employeeId: employee.id,
-          })
-        }
+        onLogin={(employee) => startCustomerSession(portalCustomer, employee)}
       />
     );
   if (portalSession) {
@@ -2123,10 +2822,17 @@ export default function Home() {
             )
           }
           onMinimumChange={updateArticleMinimum}
-          notice={notice}
+          backendPreview={portalSession.source === "backend-preview"}
         />
       );
   }
+  if (initialRoute !== "backend")
+    return (
+      <CustomerEntryLogin
+        initialCustomerNumber={initialPortalNumber}
+        onSubmit={signInCustomer}
+      />
+    );
   if (!backendSession) return <BackendLogin onSubmit={signIn} />;
 
   return (
@@ -2172,10 +2878,7 @@ export default function Home() {
                 const customer = customers[0];
                 const employee = customer?.employees[0];
                 if (customer && employee)
-                  setPortalSession({
-                    customerId: customer.id,
-                    employeeId: employee.id,
-                  });
+                  openPortalPreview(customer.id, employee);
               }}
             >
               Kundenportal ↗
@@ -2184,7 +2887,14 @@ export default function Home() {
               className="profile"
               aria-label="Abmelden"
               title="Abmelden"
-              onClick={() => setBackendSession(null)}
+              onClick={() => {
+                try {
+                  window.localStorage.removeItem(backendSessionStorageKey);
+                } catch {
+                  // Die Sitzung wird mindestens im aktuellen Tab beendet.
+                }
+                setBackendSession(null);
+              }}
             >
               {backendSession.name
                 .split(" ")
@@ -2233,9 +2943,8 @@ export default function Home() {
               onAddEmployee={addEmployee}
               onUpdateEmployee={updateEmployee}
               onDeleteEmployee={deleteEmployee}
-              onOpenPortal={(customerId, employee) =>
-                setPortalSession({ customerId, employeeId: employee.id })
-              }
+              onSendEmployeeLogin={sendEmployeeLogin}
+              onOpenPortal={openPortalPreview}
               documents={documents}
             />
           )}
@@ -2277,9 +2986,12 @@ export default function Home() {
               setFormMode={setArticleForm}
               onSave={saveArticle}
               onDelete={deleteArticle}
-              onCsvImport={importCsv}
               onAttachTemplate={attachTemplate}
-              importedCount={importedCount}
+              documents={documents}
+              onOpenDocument={(documentId) => {
+                setDocumentFocusId(documentId);
+                setView("Belege");
+              }}
             />
           )}
           {view === "Einstellungen" && (
@@ -2287,6 +2999,21 @@ export default function Home() {
               users={backendUsers}
               currentUser={backendSession}
               workflow={workflowSettings}
+              onStateImported={(state) => {
+                const normalizedArticles = state.articles.map(normalizeArticle);
+                setCustomers(state.customers);
+                setSuppliers(state.suppliers);
+                setGroups(state.groups);
+                setArticles(normalizedArticles);
+                setDocuments(state.documents);
+                setBackendUsers(state.backendUsers);
+                setWorkflowSettings({
+                  ...initialWorkflowSettings,
+                  ...(state.workflowSettings ?? {}),
+                });
+                setSelectedCustomerId(state.customers[0]?.id ?? 0);
+                setSelectedSupplierId(state.suppliers[0]?.id ?? 0);
+              }}
               onWorkflowSave={(event) => {
                 event.preventDefault();
                 const data = new FormData(event.currentTarget);
@@ -2297,11 +3024,17 @@ export default function Home() {
                   confirmationTemplate: String(
                     data.get("confirmationTemplate") || "",
                   ),
+                  employeeLoginSubject: String(
+                    data.get("employeeLoginSubject") || "",
+                  ),
+                  employeeLoginTemplate: String(
+                    data.get("employeeLoginTemplate") || "",
+                  ),
                   supplierOfferSubject: String(
                     data.get("supplierOfferSubject") || "",
                   ),
                   offerEmail: String(data.get("offerEmail") || ""),
-                  orderEmail: String(data.get("orderEmail") || ""),
+                  orderEmail: workflowSettings.orderEmail,
                   attachRequestDocument:
                     data.get("attachRequestDocument") === "on",
                   attachRequestGzd: data.get("attachRequestGzd") === "on",
@@ -2330,6 +3063,10 @@ export default function Home() {
   );
 }
 
+export default function Home() {
+  return <PrintcenterApp initialRoute="customer-home" />;
+}
+
 function Overview({
   documents,
   customers,
@@ -2355,6 +3092,16 @@ function Overview({
     (document) => document.type === "Bestellung",
   );
   const orderVolume = orders.reduce((sum, document) => sum + document.total, 0);
+  const markupProfit = orders.reduce((sum, order) => {
+    const relatedCustomerDocument = documents.find(
+      (document) =>
+        document.projectId === order.projectId &&
+        (document.type === "Auftragsbestätigung" ||
+          document.type === "Angebot") &&
+        document.markupAmount > 0,
+    );
+    return sum + (relatedCustomerDocument?.markupAmount ?? order.markupAmount);
+  }, 0);
   const activities = recentDocuments
     .filter(
       (document) =>
@@ -2404,7 +3151,9 @@ function Overview({
         <article className="metric metric--black">
           <p>Bestellvolumen letzte 24h</p>
           <strong>{formatMoney(orderVolume)}</strong>
-          <span>Einkaufsvolumen der Bestellungen</span>
+          <span className="metric-profit">
+            Gewinn aus Markup: {formatMoney(markupProfit)}
+          </span>
         </article>
       </section>
       <section className="panel customer-activity-panel">
@@ -2465,6 +3214,7 @@ function CustomersView({
   onAddEmployee,
   onUpdateEmployee,
   onDeleteEmployee,
+  onSendEmployeeLogin,
   onOpenPortal,
   documents,
 }: {
@@ -2497,6 +3247,10 @@ function CustomersView({
     customerId: number,
     employee: Employee,
   ) => void | Promise<void>;
+  onSendEmployeeLogin: (
+    customerId: number,
+    employeeId: number,
+  ) => Promise<void>;
   onOpenPortal: (customerId: number, employee: Employee) => void;
   documents: DocumentRecord[];
 }) {
@@ -2653,6 +3407,12 @@ function CustomersView({
                         <EmployeeEditForm
                           employee={editingEmployee}
                           onCancel={() => setEditingEmployeeId(null)}
+                          onSendLogin={() =>
+                            onSendEmployeeLogin(
+                              customer.id,
+                              editingEmployee.id,
+                            )
+                          }
                           onSubmit={async (data) => {
                             if (
                               await onUpdateEmployee(
@@ -2815,10 +3575,12 @@ function CustomersView({
 function EmployeeEditForm({
   employee,
   onCancel,
+  onSendLogin,
   onSubmit,
 }: {
   employee: Employee;
   onCancel: () => void;
+  onSendLogin: () => Promise<void>;
   onSubmit: (data: {
     name: string;
     salutation: Salutation;
@@ -2830,6 +3592,8 @@ function EmployeeEditForm({
     mailToMain: boolean;
   }) => void;
 }) {
+  const [sendingLogin, setSendingLogin] = useState(false);
+  const [sendError, setSendError] = useState("");
   return (
     <form
       className="employee-edit-form"
@@ -2922,6 +3686,35 @@ function EmployeeEditForm({
       <button className="secondary-button" type="button" onClick={onCancel}>
         Abbrechen
       </button>
+      <div className="employee-login-mail-action">
+        <button
+          className="secondary-button"
+          type="button"
+          disabled={sendingLogin}
+          onClick={async () => {
+            setSendingLogin(true);
+            setSendError("");
+            try {
+              await onSendLogin();
+            } catch (error) {
+              setSendError(
+                error instanceof Error
+                  ? error.message
+                  : "Die Zugangsdaten konnten nicht versendet werden.",
+              );
+            } finally {
+              setSendingLogin(false);
+            }
+          }}
+        >
+          {sendingLogin ? "Wird versendet…" : "Logindaten per E-Mail senden"}
+        </button>
+        <small>
+          Sendet Login, gespeichertes Passwort und den Firmenportal-Link an
+          {" "}{employee.email}.
+        </small>
+        {sendError && <p className="form-error">{sendError}</p>}
+      </div>
     </form>
   );
 }
@@ -3145,7 +3938,6 @@ function SuppliersView({
           <span>Lieferant</span>
           <span>Kontakt</span>
           <span>Gruppe</span>
-          <span>Lieferzeit</span>
           <span />
         </div>
         <div className="supplier-accordion-list">
@@ -3173,7 +3965,6 @@ function SuppliersView({
                   <span className="group-tag">
                     {supplier.group || "Ohne Gruppe"}
                   </span>
-                  <span>{supplier.leadTime}</span>
                   <b>{expanded ? "−" : "+"}</b>
                 </button>
                 {expanded && (
@@ -3191,8 +3982,6 @@ function SuppliersView({
                       <p className="eyebrow">PRODUKTION</p>
                       <p>
                         Gruppe: {supplier.group || "Ohne Gruppe"}
-                        <br />
-                        Lieferzeit: {supplier.leadTime}
                       </p>
                     </div>
                     <div className="expanded-actions">
@@ -3259,10 +4048,6 @@ function SupplierForm({
       <label>
         Telefon
         <input name="phone" defaultValue={supplier?.phone} />
-      </label>
-      <label>
-        Lieferzeit
-        <input name="leadTime" defaultValue={supplier?.leadTime} />
       </label>
       <button className="primary-button" type="submit">
         {supplier ? "Speichern" : "Lieferant anlegen"}
@@ -4049,9 +4834,9 @@ function ArticlesView({
   setFormMode,
   onSave,
   onDelete,
-  onCsvImport,
   onAttachTemplate,
-  importedCount,
+  documents,
+  onOpenDocument,
 }: {
   articles: Article[];
   customers: Customer[];
@@ -4061,21 +4846,23 @@ function ArticlesView({
   setFormMode: (mode: "new" | number | null) => void;
   onSave: (event: FormEvent<HTMLFormElement>) => void;
   onDelete: (article: Article) => void;
-  onCsvImport: (event: ChangeEvent<HTMLInputElement>) => void;
   onAttachTemplate: (
     event: ChangeEvent<HTMLInputElement>,
     articleId: number,
   ) => void;
-  importedCount: number;
+  documents: DocumentRecord[];
+  onOpenDocument: (documentId: number) => void;
 }) {
-  const editing =
-    typeof formMode === "number"
-      ? articles.find((article) => article.id === formMode)
-      : undefined;
   const [query, setQuery] = useState("");
   const [sortKey, setSortKey] = useState<
-    "name" | "sku" | "customer" | "supplier" | "stock" | "minimum"
-  >("name");
+    | "designation1"
+    | "designation2"
+    | "sku"
+    | "customer"
+    | "supplier"
+    | "stock"
+    | "minimum"
+  >("designation1");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const [expandedArticleId, setExpandedArticleId] = useState<number | null>(
     null,
@@ -4096,9 +4883,14 @@ function ArticlesView({
           customers.find((item) => item.id === article.customerId)?.name ?? "";
         return (
           !normalizedQuery ||
-          [article.sku, article.name, customer, article.supplier].some(
-            (value) =>
-              value.toLocaleLowerCase("de-CH").includes(normalizedQuery),
+          [
+            article.sku,
+            article.designation1,
+            article.designation2,
+            customer,
+            article.supplier,
+          ].some((value) =>
+            value.toLocaleLowerCase("de-CH").includes(normalizedQuery),
           )
         );
       })
@@ -4123,24 +4915,14 @@ function ArticlesView({
           <h2>Artikel &amp; GzD-Vorlagen</h2>
         </div>
         <div>
-          <label className="secondary-button import-button">
-            CSV importieren
-            <input type="file" accept=".csv,text/csv" onChange={onCsvImport} />
-          </label>
           <button className="primary-button" onClick={() => setFormMode("new")}>
             + Neuer Artikel
           </button>
         </div>
       </div>
-      {importedCount > 0 && (
-        <p className="import-result">
-          {importedCount} Artikel wurden im aktuellen Arbeitsstand ergänzt.
-        </p>
-      )}
-      {formMode && (
+      {formMode === "new" && (
         <ArticleForm
           key={formMode}
-          article={editing}
           customers={customers}
           suppliers={suppliers}
           groups={groups}
@@ -4156,7 +4938,7 @@ function ArticlesView({
               type="search"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Artikeltext, SKU, Kunde oder Lieferant"
+              placeholder="Bezeichnung, SKU, Kunde oder Lieferant"
             />
           </label>
           <label>
@@ -4167,7 +4949,8 @@ function ArticlesView({
                 setSortKey(event.target.value as typeof sortKey)
               }
             >
-              <option value="name">Artikel</option>
+              <option value="designation1">Bezeichnung 1</option>
+              <option value="designation2">Bezeichnung 2</option>
               <option value="sku">Artikelnummer</option>
               <option value="customer">Kunde</option>
               <option value="supplier">Lieferant / Gruppe</option>
@@ -4192,18 +4975,29 @@ function ArticlesView({
         <div className="article-list">
           <div className="article-list-head">
             <span>SKU</span>
-            <span>Artikel</span>
+            <span>Bezeichnung 1 / 2</span>
             <span>Kunde</span>
             <span>Lieferant / Gruppe</span>
             <span>Bestand</span>
-            <span>Staffeln &amp; GzD</span>
-            <span>Aktionen</span>
+            <span>GzD</span>
+            <span>Details</span>
           </div>
           {visibleArticles.map((article) => {
             const customer = customers.find(
               (item) => item.id === article.customerId,
             );
             const expanded = expandedArticleId === article.id;
+            const articleDocuments = documents
+              .filter(
+                (document) =>
+                  document.articleId === article.id ||
+                  document.items?.some((item) => item.articleId === article.id) ||
+                  (!document.articleId && document.article === article.name),
+              )
+              .sort(
+                (left, right) =>
+                  documentCreatedAt(right) - documentCreatedAt(left),
+              );
             return (
               <article
                 className={`article-list-entry ${expanded ? "is-expanded" : ""}`}
@@ -4219,7 +5013,8 @@ function ArticlesView({
                     )}
                   </span>
                   <span>
-                    <strong>{article.name}</strong>
+                    <strong>{article.designation1}</strong>
+                    <small>{article.designation2 || "Keine Bezeichnung 2"}</small>
                     <small>{formatMoney(article.unitPrice)} / Stück</small>
                   </span>
                   <span>{customer?.name ?? "Nicht zugeordnet"}</span>
@@ -4233,61 +5028,103 @@ function ArticlesView({
                     <small>Meldebestand {article.minimum}</small>
                   </span>
                   <span>
-                    <small>
-                      {article.tierQuantities.join(" / ") || "Keine Staffeln"}
-                    </small>
+                    <strong>{article.templates.length} Dateien</strong>
+                    <small>am Artikel hinterlegt</small>
+                  </span>
+                  <span className="article-list-actions">
                     <button
-                      className="article-gzd-toggle"
+                      className="secondary-button article-expand-button"
                       aria-expanded={expanded}
                       onClick={() =>
                         setExpandedArticleId(expanded ? null : article.id)
                       }
                     >
-                      {article.templates.length} GzD {expanded ? "↑" : "↓"}
-                    </button>
-                  </span>
-                  <span className="article-list-actions">
-                    <label className="file-label">
-                      GzD +
-                      <input
-                        type="file"
-                        accept=".pdf,image/*,.ai,.eps,.zip"
-                        onChange={(event) =>
-                          onAttachTemplate(event, article.id)
-                        }
-                      />
-                    </label>
-                    <button
-                      className="text-button"
-                      onClick={() => setFormMode(article.id)}
-                    >
-                      Bearbeiten
-                    </button>
-                    <button
-                      className="danger-button"
-                      onClick={() => onDelete(article)}
-                    >
-                      Löschen
+                      {expanded ? "Schliessen" : "Aufklappen"}
                     </button>
                   </span>
                 </div>
                 {expanded && (
-                  <div className="article-gzd-detail">
-                    <p className="eyebrow">GUT ZUM DRUCK · {article.sku}</p>
-                    {article.templates.length ? (
-                      <div className="article-gzd-files">
-                        {article.templates.map((template) => (
-                          <span className="file-badge" key={template.id}>
-                            <strong>{template.file}</strong>
-                            <small>{template.addedAt}</small>
-                          </span>
-                        ))}
+                  <div className="article-expanded-detail">
+                    <ArticleForm
+                      article={article}
+                      customers={customers}
+                      suppliers={suppliers}
+                      groups={groups}
+                      onSubmit={onSave}
+                      onCancel={() => setExpandedArticleId(null)}
+                    />
+                    <section className="article-expanded-side">
+                      <div className="article-gzd-detail">
+                        <div className="panel-heading compact-heading">
+                          <div>
+                            <p className="eyebrow">GUT ZUM DRUCK</p>
+                            <h3>{article.templates.length} Dateien</h3>
+                          </div>
+                          <label className="file-label">
+                            GzD hinzufügen
+                            <input
+                              type="file"
+                              accept=".pdf,image/*,.ai,.eps,.zip"
+                              onChange={(event) =>
+                                onAttachTemplate(event, article.id)
+                              }
+                            />
+                          </label>
+                        </div>
+                        {article.templates.length ? (
+                          <div className="article-gzd-files">
+                            {article.templates.map((template) => (
+                              <span className="file-badge" key={template.id}>
+                                <strong>{template.file}</strong>
+                                <small>{template.addedAt}</small>
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="empty-copy">
+                            Noch keine GzD-Datei hinterlegt.
+                          </p>
+                        )}
                       </div>
-                    ) : (
-                      <p className="empty-copy">
-                        Noch keine GzD-Datei hinterlegt.
-                      </p>
-                    )}
+                      <div className="article-document-history">
+                        <div className="panel-heading compact-heading">
+                          <div>
+                            <p className="eyebrow">BELEGVERLAUF</p>
+                            <h3>{articleDocuments.length} Belege</h3>
+                          </div>
+                        </div>
+                        <div className="article-document-history-list">
+                          {articleDocuments.length ? (
+                            articleDocuments.map((document) => (
+                              <button
+                                key={document.id}
+                                onClick={() => onOpenDocument(document.id)}
+                              >
+                                <span>
+                                  <strong>{document.number}</strong>
+                                  <small>
+                                    Projekt {document.projectId ?? "–"} · {document.date}
+                                  </small>
+                                </span>
+                                <span>{document.type}</span>
+                                <Status>{document.status}</Status>
+                                <b>→</b>
+                              </button>
+                            ))
+                          ) : (
+                            <p className="empty-copy">
+                              Zu diesem Artikel bestehen noch keine Belege.
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                      <button
+                        className="danger-button article-delete-button"
+                        onClick={() => onDelete(article)}
+                      >
+                        Artikel löschen
+                      </button>
+                    </section>
                   </div>
                 )}
               </article>
@@ -4316,16 +5153,24 @@ function ArticleForm({
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onCancel: () => void;
 }) {
-  const tiers = article?.tierQuantities ?? [];
   return (
     <form
       className="quick-form article-form article-form--extended"
       onSubmit={onSubmit}
     >
+      {article && <input type="hidden" name="articleId" value={article.id} />}
       <div className="form-section-title">Stammdaten</div>
       <label>
-        Artikel
-        <input name="name" defaultValue={article?.name} required />
+        Bezeichnung 1
+        <input
+          name="designation1"
+          defaultValue={article?.designation1}
+          required
+        />
+      </label>
+      <label>
+        Bezeichnung 2
+        <input name="designation2" defaultValue={article?.designation2} />
       </label>
       <label>
         SKU <small>leer = automatisch</small>
@@ -4364,7 +5209,6 @@ function ArticleForm({
         <input
           name="stock"
           type="number"
-          min="0"
           defaultValue={article?.stock ?? 0}
         />
       </label>
@@ -4387,21 +5231,6 @@ function ArticleForm({
           defaultValue={article?.unitPrice ?? 0}
         />
       </label>
-      <div className="form-section-title tier-title">
-        Fünf optionale Staffelgrössen
-      </div>
-      {[0, 1, 2, 3, 4].map((index) => (
-        <label key={index}>
-          Staffel {index + 1}
-          <input
-            name={`tier${index + 1}`}
-            type="number"
-            min="1"
-            defaultValue={tiers[index] ?? ""}
-            placeholder="leer"
-          />
-        </label>
-      ))}
       <button className="primary-button" type="submit">
         {article ? "Änderungen speichern" : "Artikel eröffnen"}
       </button>
@@ -4416,11 +5245,13 @@ function ReorderModal({
   article,
   templates,
   onCancel,
+  onCollective,
   onSubmit,
 }: {
   article: Article;
   templates: GzdTemplate[];
   onCancel: () => void;
+  onCollective: () => void;
   onSubmit: (data: {
     quantities: number[];
     deliveryDate: string;
@@ -4433,7 +5264,9 @@ function ReorderModal({
   const [quantityError, setQuantityError] = useState("");
   const [deliveryDate, setDeliveryDate] = useState("");
   const [note, setNote] = useState("");
-  const [template, setTemplate] = useState(templates[0]?.file ?? "");
+  const [template, setTemplate] = useState(
+    templates[0] ? String(templates[0].id) : "",
+  );
   const [upload, setUpload] = useState<{ name: string; url: string } | null>(
     null,
   );
@@ -4450,7 +5283,7 @@ function ReorderModal({
             return;
           }
           const selectedTemplate = templates.find(
-            (item) => item.file === template,
+            (item) => String(item.id) === template,
           );
           onSubmit({
             quantities: values,
@@ -4466,9 +5299,22 @@ function ReorderModal({
             <p className="eyebrow">ANFRAGE STARTEN</p>
             <h2>{article.name}</h2>
           </div>
-          <button className="secondary-button" type="button" onClick={onCancel}>
-            Schliessen
-          </button>
+          <div className="reorder-heading-actions">
+            <button
+              className="primary-button collective-start-button"
+              type="button"
+              onClick={onCollective}
+            >
+              + Sammelanfrage starten
+            </button>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={onCancel}
+            >
+              Schliessen
+            </button>
+          </div>
         </div>
         <p className="muted">
           Artikel {article.sku} · bis zu fünf frei definierbare Anfrage-Staffeln
@@ -4528,9 +5374,10 @@ function ReorderModal({
               }}
             >
               <option value="">Keine Vorlage</option>
-              {templates.map((item) => (
-                <option value={item.file} key={item.id}>
+              {templates.map((item, index) => (
+                <option value={item.id} key={item.id}>
                   {item.file} · {item.addedAt}
+                  {index === 0 ? " · Letztes GzD" : ""}
                 </option>
               ))}
             </select>
@@ -4584,6 +5431,224 @@ function ReorderModal({
   );
 }
 
+function CollectiveRequestModal({
+  articles,
+  documents,
+  onCancel,
+  onSubmit,
+}: {
+  articles: Article[];
+  documents: DocumentRecord[];
+  onCancel: () => void;
+  onSubmit: (data: {
+    items: Array<{
+      articleId: number;
+      quantities: number[];
+      printFile?: string;
+      printFileUrl?: string;
+    }>;
+    deliveryDate: string;
+    note: string;
+  }) => void;
+}) {
+  type Draft = {
+    quantities: string[];
+    template: string;
+    upload?: { name: string; url: string };
+    uploading: boolean;
+  };
+  const [drafts, setDrafts] = useState<Record<number, Draft>>(() =>
+    Object.fromEntries(
+      articles.map((article) => {
+        const templates = collectArticleGzdFiles(article, documents);
+        return [
+          article.id,
+          {
+            quantities: ["", "", "", "", ""],
+            template: templates[0]?.key ?? "",
+            uploading: false,
+          },
+        ];
+      }),
+    ),
+  );
+  const [deliveryDate, setDeliveryDate] = useState("");
+  const [note, setNote] = useState("");
+  const [error, setError] = useState("");
+  const updateDraft = (articleId: number, update: Partial<Draft>) =>
+    setDrafts((current) => ({
+      ...current,
+      [articleId]: { ...current[articleId], ...update },
+    }));
+  return (
+    <div className="modal-backdrop collective-request-backdrop">
+      <form
+        className="modal-card collective-request-modal"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const items = articles.map((article) => {
+            const draft = drafts[article.id];
+            const templates = collectArticleGzdFiles(article, documents);
+            const selectedTemplate = templates.find(
+              (template) => template.key === draft.template,
+            );
+            return {
+              articleId: article.id,
+              quantities: draft.quantities
+                .map(Number)
+                .filter((quantity) => quantity > 0),
+              printFile: draft.upload?.name || selectedTemplate?.name,
+              printFileUrl: draft.upload?.url || selectedTemplate?.url,
+            };
+          });
+          if (items.some((item) => !item.quantities.length)) {
+            setError(
+              "Bitte bei jedem Artikel mindestens eine Staffelmenge eintragen.",
+            );
+            return;
+          }
+          onSubmit({ items, deliveryDate, note });
+        }}
+      >
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">SAMMELANFRAGE</p>
+            <h2>{articles.length} Artikel gemeinsam anfragen</h2>
+          </div>
+          <button className="secondary-button" type="button" onClick={onCancel}>
+            Zurück zur Auswahl
+          </button>
+        </div>
+        <p className="muted">
+          Staffelmengen und Gut zum Druck werden pro Artikel festgelegt. Das
+          Wunsch-Lieferdatum gilt für die gesamte Sammelanfrage.
+        </p>
+        <div className="collective-request-items">
+          {articles.map((article, articleIndex) => {
+            const draft = drafts[article.id];
+            const templates = collectArticleGzdFiles(article, documents);
+            return (
+              <fieldset key={article.id}>
+                <legend>
+                  {articleIndex + 1}. {article.name} · {article.sku}
+                </legend>
+                <div className="reorder-tier-grid">
+                  {draft.quantities.map((quantity, quantityIndex) => (
+                    <label key={quantityIndex}>
+                      Staffel {quantityIndex + 1}
+                      <input
+                        type="number"
+                        min="1"
+                        value={quantity}
+                        placeholder="Menge"
+                        onChange={(event) => {
+                          setError("");
+                          updateDraft(article.id, {
+                            quantities: draft.quantities.map((value, index) =>
+                              index === quantityIndex
+                                ? event.target.value
+                                : value,
+                            ),
+                          });
+                        }}
+                      />
+                    </label>
+                  ))}
+                </div>
+                <div className="collective-gzd-fields">
+                  <label>
+                    Gut zum Druck für diesen Artikel
+                    <select
+                      value={draft.template}
+                      onChange={(event) =>
+                        updateDraft(article.id, {
+                          template: event.target.value,
+                          upload: undefined,
+                        })
+                      }
+                    >
+                      <option value="">Kein GzD auswählen</option>
+                      {templates.map((template, index) => (
+                        <option value={template.key} key={template.key}>
+                          {template.name}
+                          {index === 0 ? " · Letztes GzD" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Neues GzD hochladen
+                    <input
+                      type="file"
+                      accept=".pdf,image/*,.ai,.eps,.zip"
+                      onChange={async (event) => {
+                        const file = event.target.files?.[0];
+                        if (!file) return;
+                        updateDraft(article.id, { uploading: true });
+                        try {
+                          const upload = await uploadStoredFile(file);
+                          updateDraft(article.id, {
+                            upload,
+                            template: "",
+                            uploading: false,
+                          });
+                        } catch (uploadError) {
+                          updateDraft(article.id, { uploading: false });
+                          setError(
+                            uploadError instanceof Error
+                              ? uploadError.message
+                              : "Das GzD konnte nicht gespeichert werden.",
+                          );
+                        }
+                      }}
+                    />
+                    <small className="muted">
+                      {draft.uploading
+                        ? "Datei wird gespeichert …"
+                        : draft.upload?.name || "Optional"}
+                    </small>
+                  </label>
+                </div>
+              </fieldset>
+            );
+          })}
+        </div>
+        <div className="collective-request-footer-fields">
+          <label>
+            Gemeinsames Wunsch-Lieferdatum
+            <input
+              type="date"
+              value={deliveryDate}
+              onChange={(event) => setDeliveryDate(event.target.value)}
+              required
+            />
+          </label>
+          <label>
+            Bemerkung zur Sammelanfrage
+            <textarea
+              value={note}
+              onChange={(event) => setNote(event.target.value)}
+              rows={3}
+            />
+          </label>
+        </div>
+        {error && (
+          <p className="login-error" role="alert">
+            {error}
+          </p>
+        )}
+        <button
+          className="primary-button"
+          type="submit"
+          disabled={Object.values(drafts).some((draft) => draft.uploading)}
+        >
+          Sammelanfrage jetzt senden →
+        </button>
+      </form>
+    </div>
+  );
+}
+
 function StockArticleDetail({
   article,
   documents,
@@ -4597,50 +5662,11 @@ function StockArticleDetail({
   const articleDocuments = documents.filter(
     (document) =>
       (document.articleId === article.id ||
+        document.items?.some((item) => item.articleId === article.id) ||
         (!document.articleId && document.article === article.name)) &&
       ["Anfrage", "Angebot", "Auftragsbestätigung"].includes(document.type),
   );
-  const gzdFiles = [
-    ...article.templates.map((template) => ({
-      key: `template-${template.id}`,
-      name: template.file,
-      url: template.url,
-      source: "Artikelvorlage",
-      addedAt: template.addedAt,
-    })),
-    ...articleDocuments.flatMap((document) => {
-      const files: Array<{
-        key: string;
-        name: string;
-        url?: string;
-        source: string;
-        addedAt: string;
-      }> = [];
-      if (document.printFile)
-        files.push({
-          key: `customer-${document.id}-${document.printFile}`,
-          name: document.printFile,
-          url: document.printFileUrl,
-          source: "Vom Kunden",
-          addedAt: `${document.number} · ${document.date}`,
-        });
-      if (document.supplierGzd)
-        files.push({
-          key: `supplier-${document.id}-${document.supplierGzd}`,
-          name: document.supplierGzd,
-          url: document.supplierGzdUrl,
-          source: "Vom Lieferanten",
-          addedAt: `${document.number} · ${document.date}`,
-        });
-      return files;
-    }),
-  ].filter(
-    (file, index, files) =>
-      files.findIndex(
-        (candidate) =>
-          candidate.name === file.name && candidate.url === file.url,
-      ) === index,
-  );
+  const gzdFiles = collectArticleGzdFiles(article, articleDocuments);
   return (
     <div className="stock-detail-content">
       <div className="stock-detail-toolbar">
@@ -4700,10 +5726,14 @@ function StockArticleDetail({
                   <span>{document.number}</span>
                   <strong>{document.type}</strong>
                   <small>
-                    Projekt {document.projectId ?? "-"} · {document.quantity}{" "}
+                    Projekt {document.projectId ?? "-"} · Artikel-Nr. {article.sku}
+                    {" · "}
+                    {document.items?.find(
+                      (item) => item.articleId === article.id,
+                    )?.quantity ?? document.quantity}{" "}
                     Stück · {document.status}
                   </small>
-                  {document.pdfUrl && (
+                  {document.type !== "Anfrage" && document.pdfUrl && (
                     <button
                       className="text-button"
                       onClick={() =>
@@ -4724,8 +5754,14 @@ function StockArticleDetail({
           <p className="eyebrow">GUT ZUM DRUCK</p>
           <div className="article-gzd-files customer-gzd-files">
             {gzdFiles.length ? (
-              gzdFiles.map((file) => (
-                <span className="file-badge" key={file.key}>
+              gzdFiles.map((file, index) => (
+                <span
+                  className={`file-badge ${index === 0 ? "is-latest-gzd" : ""}`}
+                  key={file.key}
+                >
+                  {index === 0 && (
+                    <em className="latest-gzd-badge">Letztes GzD</em>
+                  )}
                   <strong>{file.name}</strong>
                   <small>
                     {file.source} · {file.addedAt}
@@ -4764,7 +5800,7 @@ function CustomerPortal({
   onExit,
   onReorder,
   onMinimumChange,
-  notice,
+  backendPreview,
 }: {
   customer: Customer;
   employee: Employee;
@@ -4773,12 +5809,19 @@ function CustomerPortal({
   onExit: () => void;
   onReorder: (article: Article) => void;
   onMinimumChange: (articleId: number, minimum: number) => void;
-  notice: string;
+  backendPreview: boolean;
 }) {
   const [reorderArticle, setReorderArticle] = useState<Article | null>(null);
+  const [collectiveSupplier, setCollectiveSupplier] = useState<string | null>(
+    null,
+  );
+  const [collectiveArticleIds, setCollectiveArticleIds] = useState<number[]>(
+    [],
+  );
+  const [collectiveReviewOpen, setCollectiveReviewOpen] = useState(false);
   const [filter, setFilter] = useState<DocumentType | null>(null);
   const [offerQuantities, setOfferQuantities] = useState<
-    Record<number, number>
+    Record<string, number>
   >({});
   const [stockOpen, setStockOpen] = useState(false);
   const [selectedStockArticleId, setSelectedStockArticleId] = useState<
@@ -4790,6 +5833,38 @@ function CustomerPortal({
   const [stockSort, setStockSort] = useState<
     "name" | "sku" | "stock-asc" | "stock-desc"
   >("name");
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [requestConfirmation, setRequestConfirmation] = useState<{
+    article: string;
+    sku: string;
+    mailStatus: "sending" | "sent" | "error";
+    mailMessage?: string;
+  } | null>(null);
+  useEffect(() => {
+    const onMailStatus = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          status: "sent" | "error";
+          message: string;
+        }>
+      ).detail;
+      setRequestConfirmation((current) =>
+        current
+          ? {
+              ...current,
+              mailStatus: detail.status,
+              mailMessage: detail.message,
+            }
+          : current,
+      );
+    };
+    window.addEventListener("printcenter:request-mail-status", onMailStatus);
+    return () =>
+      window.removeEventListener(
+        "printcenter:request-mail-status",
+        onMailStatus,
+      );
+  }, []);
   const ownArticles = articles.filter(
     (article) => article.customerId === customer.id,
   );
@@ -4821,6 +5896,9 @@ function CustomerPortal({
     (document) =>
       document.employeeId === employee.id && document.type !== "Bestellung",
   );
+  const newOffers = ownDocuments.filter(
+    (document) => document.type === "Angebot" && document.status === "Offen",
+  );
   const customerArticleDocuments = documents.filter(
     (document) => document.customerId === customer.id,
   );
@@ -4846,10 +5924,65 @@ function CustomerPortal({
       }),
     );
     onReorder(reorderArticle);
+    setRequestConfirmation({
+      article: reorderArticle.name,
+      sku: reorderArticle.sku,
+      mailStatus: "sending",
+    });
     setReorderArticle(null);
     setFilter("Anfrage");
   }
+  function startCollectiveRequest(article: Article) {
+    setCollectiveSupplier(article.supplier);
+    setCollectiveArticleIds([article.id]);
+    setCollectiveReviewOpen(false);
+    setReorderArticle(null);
+    setStockOpen(true);
+    setSelectedStockArticleId(null);
+  }
+  function cancelCollectiveRequest() {
+    setCollectiveSupplier(null);
+    setCollectiveArticleIds([]);
+    setCollectiveReviewOpen(false);
+  }
+  function toggleCollectiveArticle(article: Article) {
+    if (article.supplier !== collectiveSupplier) return;
+    setCollectiveArticleIds((current) =>
+      current.includes(article.id)
+        ? current.filter((articleId) => articleId !== article.id)
+        : [...current, article.id],
+    );
+  }
+  function submitCollectiveRequest(data: {
+    items: Array<{
+      articleId: number;
+      quantities: number[];
+      printFile?: string;
+      printFileUrl?: string;
+    }>;
+    deliveryDate: string;
+    note: string;
+  }) {
+    window.dispatchEvent(
+      new CustomEvent("printcenter:collective-request", {
+        detail: {
+          customerId: customer.id,
+          employeeId: employee.id,
+          supplier: collectiveSupplier,
+          ...data,
+        },
+      }),
+    );
+    setRequestConfirmation({
+      article: `Sammelanfrage mit ${data.items.length} Artikeln`,
+      sku: collectiveSupplier ?? "Lieferant",
+      mailStatus: "sending",
+    });
+    cancelCollectiveRequest();
+    setFilter("Anfrage");
+  }
   function openTile(type: DocumentType) {
+    cancelCollectiveRequest();
     setStockOpen(false);
     setSelectedStockArticleId(null);
     setReorderArticle(null);
@@ -4857,9 +5990,17 @@ function CustomerPortal({
   }
   function accept(document: DocumentRecord) {
     const quantity = offerQuantities[document.id] ?? document.quantity;
+    const itemQuantities = document.items?.length
+      ? Object.fromEntries(
+          document.items.map((item) => [
+            String(item.articleId),
+            offerQuantities[`${document.id}:${item.articleId}`] ?? item.quantity,
+          ]),
+        )
+      : undefined;
     window.dispatchEvent(
       new CustomEvent("printcenter:offer-accept", {
-        detail: { offerId: document.id, quantity },
+        detail: { offerId: document.id, quantity, itemQuantities },
       }),
     );
   }
@@ -4871,37 +6012,53 @@ function CustomerPortal({
           <span>printcenter</span>
         </div>
         <div className="portal-header-actions">
+          <div className="portal-notifications">
+            <button
+              className="portal-notification-button"
+              type="button"
+              aria-label={`${newOffers.length} neue Angebote`}
+              aria-expanded={notificationsOpen}
+              onClick={() => setNotificationsOpen((current) => !current)}
+            >
+              <span className="portal-bell-icon" aria-hidden="true" />
+              {newOffers.length > 0 && <b>{newOffers.length}</b>}
+            </button>
+            {notificationsOpen && (
+              <div className="portal-notification-menu">
+                <strong>Neue Angebote</strong>
+                {newOffers.length ? (
+                  newOffers.map((offer) => (
+                    <button
+                      type="button"
+                      key={offer.id}
+                      onClick={() => {
+                        openTile("Angebot");
+                        setNotificationsOpen(false);
+                      }}
+                    >
+                      <span>{offer.number}</span>
+                      <small>
+                        {offer.article} · Projekt {offer.projectId ?? offer.id}
+                      </small>
+                    </button>
+                  ))
+                ) : (
+                  <small>Keine neuen Angebote vorhanden.</small>
+                )}
+              </div>
+            )}
+          </div>
           <span className="portal-customer">
-            {customer.number} · {employee.email}
+            <strong>{customer.name}</strong>
+            <small>
+              {customer.number} · {employee.email}
+            </small>
           </span>
           <button className="portal-button" onClick={onExit}>
-            Zur Administration
+            {backendPreview ? "Portalansicht schliessen" : "Abmelden"}
           </button>
         </div>
       </header>
-      <section className="portal-intro">
-        <div>
-          <p className="eyebrow">{customer.name.toUpperCase()}</p>
-          <h1>
-            {employeeGreeting(employee)}.<br />
-            <em>Alles bereit.</em>
-          </h1>
-          <p>
-            Wähle eine Funktion. Artikel erscheinen erst, wenn du Lagerartikel
-            oder eine neue Anfrage öffnest.
-          </p>
-        </div>
-        <div className="portal-shape">
-          <span />
-          <i />
-        </div>
-      </section>
-      {notice && (
-        <p className="notice portal-notice">
-          <span className="notice-mark">+</span>
-          {notice}
-        </p>
-      )}
       <section className="portal-tiles">
         <button
           className={`portal-tile portal-stock-tile ${stockOpen ? "is-active" : ""}`}
@@ -4913,8 +6070,8 @@ function CustomerPortal({
           }}
         >
           <span>01</span>
-          <strong>Meine Lagerartikel</strong>
-          <small>Alle Artikel, Bestand &amp; Verlauf →</small>
+          <strong>Meine Lagerartikel und Nachbestellung starten</strong>
+          <small>Bestand prüfen oder direkt eine Anfrage starten →</small>
         </button>
         {portalDocumentTypes.map((type, index) => {
           const count = ownDocuments.filter(
@@ -4929,9 +6086,7 @@ function CustomerPortal({
               <span>0{index + 2}</span>
               <strong>{type}</strong>
               <small>
-                {type === "Anfrage"
-                  ? "Neue Anfrage starten →"
-                  : `${count} ${count === 1 ? "Beleg" : "Belege"} ansehen →`}
+                {count} {count === 1 ? "Beleg" : "Belege"} ansehen →
               </small>
             </button>
           );
@@ -4954,6 +6109,25 @@ function CustomerPortal({
               Schliessen
             </button>
           </div>
+          {collectiveSupplier && (
+            <div className="collective-selection-banner">
+              <div>
+                <p className="eyebrow">SAMMELANFRAGE AKTIV</p>
+                <strong>{collectiveSupplier}</strong>
+                <span>
+                  Es können nur Artikel mit diesem Lieferanten hinzugefügt
+                  werden.
+                </span>
+              </div>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={cancelCollectiveRequest}
+              >
+                Sammelanfrage abbrechen
+              </button>
+            </div>
+          )}
           <div className="stock-filter-bar">
             <label>
               Artikelnummer / SKU
@@ -4982,8 +6156,8 @@ function CustomerPortal({
                 }
               >
                 <option value="alle">Alle Ampeln</option>
-                <option value="rot">Rot · unter Meldebestand</option>
-                <option value="gelb">Gelb · auf Meldebestand</option>
+                <option value="rot">Rot · Minusbestand</option>
+                <option value="gelb">Gelb · bis Meldebestand</option>
                 <option value="grün">Grün · über Meldebestand</option>
               </select>
             </label>
@@ -5007,59 +6181,101 @@ function CustomerPortal({
           </div>
           <div className="stock-article-list">
             <div className="stock-article-list-head">
-              <span>Ampel</span>
               <span>SKU</span>
               <span>Artikel</span>
               <span>Bestand</span>
               <span>Meldebestand</span>
+              <span>Ampel</span>
               <span>Deckung</span>
               <span>GzD</span>
-              <span />
+              <span>Details</span>
+              <span>{collectiveSupplier ? "Sammelwahl" : "Anfrage"}</span>
             </div>
             {visibleStockArticles.map((article) => {
               const expanded = selectedStockArticleId === article.id;
               const signal = stockSignalFor(article);
               const coverage = article.stock - article.minimum;
-              const projectGzdNames = customerArticleDocuments
-                .filter((document) => document.articleId === article.id)
-                .flatMap((document) => [
-                  document.printFile,
-                  document.supplierGzd,
-                ])
-                .filter(Boolean);
-              const gzdCount = new Set([
-                ...article.templates.map((template) => template.file),
-                ...projectGzdNames,
-              ]).size;
+              const articleGzdFiles = collectArticleGzdFiles(
+                article,
+                customerArticleDocuments,
+              );
+              const gzdCount = articleGzdFiles.length;
+              const collectiveEligible = collectiveSupplier
+                ? article.supplier === collectiveSupplier
+                : false;
+              const collectiveSelected = collectiveArticleIds.includes(
+                article.id,
+              );
               return (
                 <article
                   className={`stock-article-item ${expanded ? "is-expanded" : ""}`}
                   key={article.id}
                 >
-                  <button
+                  <div
                     className={`stock-article-row ${expanded ? "is-selected" : ""}`}
-                    aria-expanded={expanded}
-                    onClick={() =>
-                      setSelectedStockArticleId(expanded ? null : article.id)
-                    }
                   >
-                    <span className="stock-signal-cell">
-                      <i className={`stock-signal stock-signal--${signal}`} />
-                      <small>{signal}</small>
+                    <span className="sku" data-label="SKU">
+                      {article.sku}
                     </span>
-                    <span className="sku">{article.sku}</span>
                     <strong>{article.name}</strong>
-                    <span>{article.stock} Stück</span>
-                    <span>{article.minimum} Stück</span>
+                    <span data-label="Bestand">{article.stock} Stück</span>
+                    <span data-label="Meldebestand">
+                      {article.minimum} Stück
+                    </span>
+                    <span
+                      className="stock-signal-cell"
+                      data-label="Ampel"
+                      aria-label={`Ampelstatus ${signal}`}
+                    >
+                      <i
+                        className={`stock-signal stock-signal--${signal}`}
+                        aria-hidden="true"
+                      />
+                    </span>
                     <span
                       className={`stock-coverage stock-coverage--${signal}`}
+                      data-label="Deckung"
                     >
                       {coverage > 0 ? "+" : ""}
                       {coverage} Stück
                     </span>
-                    <span>{gzdCount} Dateien</span>
-                    <b>{expanded ? "Einklappen ↑" : "Aufklappen ↓"}</b>
-                  </button>
+                    <span className="stock-gzd-summary" data-label="GzD">
+                      {gzdCount} {gzdCount === 1 ? "Datei" : "Dateien"}
+                      {articleGzdFiles[0] && (
+                        <small title={articleGzdFiles[0].name}>
+                          Letztes GzD
+                        </small>
+                      )}
+                    </span>
+                    <button
+                      className="stock-expand-button"
+                      aria-expanded={expanded}
+                      onClick={() =>
+                        setSelectedStockArticleId(expanded ? null : article.id)
+                      }
+                    >
+                      {expanded ? "Einklappen ↑" : "Aufklappen ↓"}
+                    </button>
+                    <button
+                      className={`stock-request-button ${collectiveSelected ? "is-selected" : ""}`}
+                      disabled={Boolean(
+                        collectiveSupplier && !collectiveEligible,
+                      )}
+                      onClick={() =>
+                        collectiveSupplier
+                          ? toggleCollectiveArticle(article)
+                          : setReorderArticle(article)
+                      }
+                    >
+                      {collectiveSupplier
+                        ? collectiveEligible
+                          ? collectiveSelected
+                            ? "✓ Hinzugefügt"
+                            : "+ Hinzufügen"
+                          : "Anderer Lieferant"
+                        : "Anfrage starten →"}
+                    </button>
+                  </div>
                   {expanded && (
                     <StockArticleDetail
                       article={article}
@@ -5078,15 +6294,22 @@ function CustomerPortal({
           </div>
         </section>
       )}
-      {filter === "Anfrage" && !reorderArticle && (
-        <PortalRequestPicker
-          articles={ownArticles}
-          onSelect={setReorderArticle}
-        />
+      {collectiveSupplier && !collectiveReviewOpen && (
+        <button
+          className="collective-cart-button"
+          type="button"
+          disabled={!collectiveArticleIds.length}
+          onClick={() => setCollectiveReviewOpen(true)}
+        >
+          <span>{collectiveArticleIds.length}</span>
+          <strong>Sammelanfrage prüfen</strong>
+          <small>{collectiveSupplier} →</small>
+        </button>
       )}
       {filter && (
         <PortalDocuments
           documents={shownDocuments}
+          articles={articles}
           offerQuantities={offerQuantities}
           setOfferQuantities={setOfferQuantities}
           onAccept={accept}
@@ -5095,10 +6318,72 @@ function CustomerPortal({
       {reorderArticle && (
         <ReorderModal
           article={reorderArticle}
-          templates={reorderArticle.templates}
+          templates={collectArticleGzdFiles(
+            reorderArticle,
+            customerArticleDocuments,
+          ).map((file) => ({
+            id: file.id,
+            file: file.name,
+            addedAt: file.addedAt,
+            url: file.url,
+          }))}
           onCancel={() => setReorderArticle(null)}
+          onCollective={() => startCollectiveRequest(reorderArticle)}
           onSubmit={submitRequest}
         />
+      )}
+      {collectiveReviewOpen && collectiveSupplier && (
+        <CollectiveRequestModal
+          articles={collectiveArticleIds
+            .map((articleId) =>
+              ownArticles.find((article) => article.id === articleId),
+            )
+            .filter((article): article is Article => Boolean(article))}
+          documents={customerArticleDocuments}
+          onCancel={() => setCollectiveReviewOpen(false)}
+          onSubmit={submitCollectiveRequest}
+        />
+      )}
+      {requestConfirmation && (
+        <div className="modal-backdrop request-confirmation-backdrop">
+          <section
+            className="modal-card request-confirmation-card"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="request-confirmation-title"
+          >
+            <span className="request-confirmation-mark" aria-hidden="true">
+              ✓
+            </span>
+            <p className="eyebrow">ANFRAGE ERFOLGREICH</p>
+            <h2 id="request-confirmation-title">Vielen Dank.</h2>
+            <p>
+              Ihre Anfrage für <strong>{requestConfirmation.article}</strong> (
+              {requestConfirmation.sku}) wurde erstellt und wird nun bearbeitet.
+            </p>
+            <p
+              className={`request-confirmation-mail request-confirmation-mail--${requestConfirmation.mailStatus}`}
+              role={
+                requestConfirmation.mailStatus === "error" ? "alert" : "status"
+              }
+            >
+              {requestConfirmation.mailStatus === "sending" &&
+                "Die Lieferantenmail wird gesendet …"}
+              {requestConfirmation.mailStatus === "sent" &&
+                (requestConfirmation.mailMessage ||
+                  "Die Lieferantenmail wurde erfolgreich versendet.")}
+              {requestConfirmation.mailStatus === "error" &&
+                `Die Anfrage bleibt gespeichert. Mailversand fehlgeschlagen: ${requestConfirmation.mailMessage || "Unbekannter Fehler"}`}
+            </p>
+            <button
+              className="primary-button"
+              type="button"
+              onClick={() => setRequestConfirmation(null)}
+            >
+              Zu meinen Anfragen
+            </button>
+          </section>
+        </div>
       )}
       <footer className="portal-footer">
         <span>printcenter</span>
@@ -5107,55 +6392,17 @@ function CustomerPortal({
     </main>
   );
 }
-function PortalRequestPicker({
-  articles,
-  onSelect,
-}: {
-  articles: Article[];
-  onSelect: (article: Article) => void;
-}) {
-  return (
-    <section className="portal-section request-picker">
-      <div className="panel-heading">
-        <div>
-          <p className="eyebrow">NEUE ANFRAGE</p>
-          <h2>Artikel auswählen</h2>
-        </div>
-        <span className="muted">{articles.length} Kundenartikel</span>
-      </div>
-      <div className="request-picker-grid">
-        {articles.length ? (
-          articles.map((article) => (
-            <button key={article.id} onClick={() => onSelect(article)}>
-              <span className="sku">{article.sku}</span>
-              <strong>{article.name}</strong>
-              <small>
-                {article.tierQuantities.length
-                  ? `Hinterlegte Staffeln ${article.tierQuantities.join(" / ")}`
-                  : "Staffelmengen werden in der Anfrage frei eingegeben"}{" "}
-                · {article.templates.length} GzD-Vorlagen
-              </small>
-              <b>Anfrage starten →</b>
-            </button>
-          ))
-        ) : (
-          <p className="empty-copy">
-            Für diesen Kunden sind noch keine Artikel hinterlegt.
-          </p>
-        )}
-      </div>
-    </section>
-  );
-}
 function PortalDocuments({
   documents,
+  articles,
   offerQuantities,
   setOfferQuantities,
   onAccept,
 }: {
   documents: DocumentRecord[];
-  offerQuantities: Record<number, number>;
-  setOfferQuantities: (value: Record<number, number>) => void;
+  articles: Article[];
+  offerQuantities: Record<string, number>;
+  setOfferQuantities: (value: Record<string, number>) => void;
   onAccept: (document: DocumentRecord) => void;
 }) {
   const [numberQuery, setNumberQuery] = useState("");
@@ -5169,6 +6416,13 @@ function PortalDocuments({
   >("newest");
   const normalizeHistoryFilter = (value: string) =>
     value.trim().toLocaleLowerCase("de-CH");
+  const articleSkuForDocument = (document: DocumentRecord) =>
+    document.items?.length
+      ? document.items.map((item) => item.sku).join(", ")
+      : (articles.find(
+          (article) =>
+            article.id === document.articleId || article.name === document.article,
+        )?.sku ?? "Nicht zugeordnet");
   const visibleDocuments = documents
     .filter(
       (document) =>
@@ -5181,8 +6435,14 @@ function PortalDocuments({
             projectQuery.trim(),
           )) &&
         (!articleQuery ||
-          normalizeHistoryFilter(document.article).includes(
-            normalizeHistoryFilter(articleQuery),
+          [
+            document.article,
+            articleSkuForDocument(document),
+            ...(document.items?.flatMap((item) => [item.article, item.sku]) ?? []),
+          ].some((value) =>
+            normalizeHistoryFilter(value).includes(
+              normalizeHistoryFilter(articleQuery),
+            ),
           )) &&
         (historyStatus === "Alle" || document.status === historyStatus),
     )
@@ -5247,12 +6507,12 @@ function PortalDocuments({
           />
         </label>
         <label>
-          Artikel
+          Artikel / Artikelnummer
           <input
             type="search"
             value={articleQuery}
             onChange={(event) => setArticleQuery(event.target.value)}
-            placeholder="Artikelbezeichnung"
+            placeholder="Bezeichnung oder SKU"
           />
         </label>
         <label>
@@ -5288,6 +6548,8 @@ function PortalDocuments({
       <div className="portal-document-list">
         {visibleDocuments.length ? (
           visibleDocuments.map((document) => {
+            const articleSku = articleSkuForDocument(document);
+            const collectiveItems = document.items ?? [];
             const options = document.offerOptions ?? [
               { quantity: document.quantity, unitPrice: document.unitPrice },
             ];
@@ -5296,32 +6558,88 @@ function PortalDocuments({
             const selectedOption =
               options.find((option) => option.quantity === selectedQuantity) ??
               options[0];
-            const selectedTotal = customerTotalForOption(
-              selectedOption,
-              document.markupPercent,
-            );
+            const selectedTotal = collectiveItems.length
+              ? collectiveItems.reduce((sum, item) => {
+                  const itemOptions = item.offerOptions ?? [
+                    {
+                      quantity: item.quantity,
+                      unitPrice: item.unitPrice,
+                      supplierTotal: item.subtotal,
+                    },
+                  ];
+                  const itemQuantity =
+                    offerQuantities[`${document.id}:${item.articleId}`] ??
+                    item.quantity;
+                  const itemOption =
+                    itemOptions.find(
+                      (option) => option.quantity === itemQuantity,
+                    ) ?? itemOptions[0];
+                  return (
+                    sum +
+                    customerTotalForOption(
+                      itemOption,
+                      document.markupPercent,
+                    )
+                  );
+                }, 0)
+              : customerTotalForOption(selectedOption, document.markupPercent);
             const customerPriceDocument =
               document.type === "Angebot" ||
               document.type === "Auftragsbestätigung";
             const displayedTotal =
               document.type === "Angebot" ? selectedTotal : document.total;
             const displayedUnitPrice =
-              displayedTotal /
+              collectiveItems.length
+                ? 0
+                : displayedTotal /
               (document.type === "Angebot"
                 ? selectedOption.quantity
                 : document.quantity);
             const requestOffered =
               document.type === "Anfrage" && document.status === "Bestätigt";
+            const offerStatus =
+              document.type === "Angebot"
+                ? document.status === "Bestätigt"
+                  ? "Bestellt"
+                  : document.status === "Offen"
+                    ? "Offen"
+                    : document.status
+                : null;
+            const confirmationDeliveryDate =
+              document.type === "Auftragsbestätigung"
+                ? document.supplierDeliveryDate ?? document.deliveryDate
+                : undefined;
             return (
-              <article key={document.id}>
+              <article
+                className={
+                  collectiveItems.length > 0
+                    ? "portal-document-item--collective"
+                    : undefined
+                }
+                key={document.id}
+              >
                 <strong>
                   {document.number}
                   <small>Projekt {document.projectId ?? "-"}</small>
                 </strong>
                 <span>
                   {document.type} · {document.article}
+                  <small className="portal-document-sku">
+                    Artikel-Nr. {articleSku}
+                  </small>
+                  {collectiveItems.length > 0 && (
+                    <div className="portal-collective-items">
+                      {collectiveItems.map((item) => (
+                        <span key={item.articleId}>
+                          <strong>{item.article}</strong>
+                          <small>{item.sku}</small>
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   <small>
-                    {document.supplierDeliveryDate
+                    {document.supplierDeliveryDate &&
+                    document.type !== "Auftragsbestätigung"
                       ? `Lieferdatum: ${document.supplierDeliveryDate}`
                       : document.supplierLeadTime
                         ? `Lieferzeit: ${document.supplierLeadTime}`
@@ -5363,6 +6681,53 @@ function PortalDocuments({
                       </label>
                     </div>
                   )}
+                  {document.type === "Angebot" &&
+                    collectiveItems.some((item) => item.supplierGzd) && (
+                      <div className="portal-collective-gzds">
+                        {collectiveItems
+                          .filter((item) => item.supplierGzd)
+                          .map((item) => (
+                            <div
+                              key={item.articleId}
+                              className="portal-collective-gzd-row"
+                            >
+                              {item.supplierGzdUrl ? (
+                                <a
+                                  className="text-button"
+                                  href={item.supplierGzdUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  GzD {item.sku}: {item.supplierGzd} ↗
+                                </a>
+                              ) : (
+                                <span>
+                                  GzD {item.sku}: {item.supplierGzd}
+                                </span>
+                              )}
+                              <select
+                                aria-label={`GzD-Status für ${item.sku}`}
+                                value={item.gzdStatus ?? "In Prüfung"}
+                                onChange={(event) =>
+                                  window.dispatchEvent(
+                                    new CustomEvent("printcenter:gzd-status", {
+                                      detail: {
+                                        documentId: document.id,
+                                        articleId: item.articleId,
+                                        status: event.target.value as GzdStatus,
+                                      },
+                                    }),
+                                  )
+                                }
+                              >
+                                <option>In Prüfung</option>
+                                <option>Freigegeben</option>
+                                <option>Abgelehnt</option>
+                              </select>
+                            </div>
+                          ))}
+                      </div>
+                    )}
                 </span>
                 {document.type === "Anfrage" ? (
                   <b
@@ -5376,31 +6741,65 @@ function PortalDocuments({
                     </small>
                   </b>
                 ) : (
-                  <b>
-                    {formatMoney(displayedTotal)}
-                    {customerPriceDocument && (
-                      <small>
-                        {formatUnitMoney(displayedUnitPrice)} / Stück · exkl.
-                        MwSt.
-                      </small>
+                  <div className="portal-price-status">
+                    {offerStatus && (
+                      <span
+                        className={`offer-status offer-status--${offerStatus.toLocaleLowerCase("de-CH")}`}
+                      >
+                        {offerStatus}
+                      </span>
                     )}
-                  </b>
+                    <b>
+                      {formatMoney(displayedTotal)}
+                      {customerPriceDocument && (
+                        <small>
+                          {collectiveItems.length
+                            ? `${collectiveItems.length} Artikel · exkl. MwSt.`
+                            : `${formatUnitMoney(displayedUnitPrice)} / Stück · exkl. MwSt.`}
+                        </small>
+                      )}
+                    </b>
+                    {confirmationDeliveryDate && (
+                      <span className="confirmation-delivery">
+                        <span>
+                          Liefertermin
+                          <strong>
+                            {formatPortalDate(confirmationDeliveryDate)}
+                          </strong>
+                        </span>
+                        <button
+                          className="delivery-info"
+                          type="button"
+                          aria-label="Hinweis zum Liefertermin"
+                        >
+                          i
+                          <span role="tooltip">
+                            Der angegebene Liefertermin bezeichnet die
+                            Anlieferung in unserem Lager. Die anschliessende
+                            Warenprüfung und Einlagerung können zusätzliche Zeit
+                            beanspruchen.
+                          </span>
+                        </button>
+                      </span>
+                    )}
+                  </div>
                 )}
                 <div className="portal-document-actions">
-                  {document.pdfUrl ? (
-                    <button
-                      className="text-button"
-                      onClick={() =>
-                        downloadDocumentPdf(document.pdfUrl!, document.number)
-                      }
-                    >
-                      {document.type === "Angebot"
-                        ? "Angebot herunterladen"
-                        : `${document.type} herunterladen`}
-                    </button>
-                  ) : (
-                    <small>PDF wird erstellt…</small>
-                  )}
+                  {document.type !== "Anfrage" &&
+                    (document.pdfUrl ? (
+                      <button
+                        className="text-button"
+                        onClick={() =>
+                          downloadDocumentPdf(document.pdfUrl!, document.number)
+                        }
+                      >
+                        {document.type === "Angebot"
+                          ? "Angebot herunterladen"
+                          : `${document.type} herunterladen`}
+                      </button>
+                    ) : (
+                      <small>PDF wird erstellt…</small>
+                    ))}
                   {document.type === "Angebot" && document.supplierGzd && (
                     <button
                       className="text-button"
@@ -5416,7 +6815,49 @@ function PortalDocuments({
                   {document.type === "Angebot" &&
                     document.status === "Offen" && (
                       <div className="offer-actions">
-                        {options.length > 1 && (
+                        {collectiveItems.length > 0 ? (
+                          <div className="collective-offer-selection">
+                            {collectiveItems.map((item) => {
+                              const itemOptions = item.offerOptions ?? [];
+                              const selected =
+                                offerQuantities[
+                                  `${document.id}:${item.articleId}`
+                                ] ?? item.quantity;
+                              return (
+                                <label key={item.articleId}>
+                                  <span>
+                                    {item.article} <small>{item.sku}</small>
+                                  </span>
+                                  <select
+                                    value={selected}
+                                    onChange={(event) =>
+                                      setOfferQuantities({
+                                        ...offerQuantities,
+                                        [`${document.id}:${item.articleId}`]:
+                                          Number(event.target.value),
+                                      })
+                                    }
+                                  >
+                                    {itemOptions.map((option) => {
+                                      const total = customerTotalForOption(
+                                        option,
+                                        document.markupPercent,
+                                      );
+                                      return (
+                                        <option
+                                          value={option.quantity}
+                                          key={option.quantity}
+                                        >
+                                          {option.quantity} Stück · {formatMoney(total)}
+                                        </option>
+                                      );
+                                    })}
+                                  </select>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        ) : options.length > 1 ? (
                           <select
                             aria-label={`Menge für ${document.number}`}
                             value={selectedQuantity}
@@ -5444,7 +6885,7 @@ function PortalDocuments({
                               );
                             })}
                           </select>
-                        )}
+                        ) : null}
                         <button
                           className="primary-button"
                           onClick={() => onAccept(document)}
@@ -5478,6 +6919,100 @@ function PortalDocuments({
         )}
       </div>
     </section>
+  );
+}
+
+function CustomerEntryLogin({
+  initialCustomerNumber = "",
+  onSubmit,
+}: {
+  initialCustomerNumber?: string;
+  onSubmit: (
+    customerNumber: string,
+    email: string,
+    password: string,
+  ) => boolean;
+}) {
+  const [error, setError] = useState("");
+  return (
+    <main className="portal-login customer-entry-login">
+      <section className="login-panel portal-login-panel">
+        <div className="brand brand--login">
+          <Monogram />
+          <span>
+            print
+            <br />
+            center
+          </span>
+        </div>
+        <p className="eyebrow">KUNDENPORTAL</p>
+        <h1>Kundenlogin.</h1>
+        <p className="login-copy">
+          Melde dich mit Kundennummer, persönlicher Mailadresse und Passwort
+          an.
+        </p>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            const data = new FormData(event.currentTarget);
+            const success = onSubmit(
+              String(data.get("customerNumber") || ""),
+              String(data.get("email") || ""),
+              String(data.get("password") || ""),
+            );
+            setError(
+              success
+                ? ""
+                : "Kundennummer, Mailadresse oder Passwort ist nicht korrekt.",
+            );
+          }}
+        >
+          <label>
+            Kundennummer
+            <input
+              name="customerNumber"
+              required
+              defaultValue={initialCustomerNumber}
+              autoComplete="organization"
+              placeholder="z. B. K-10038"
+            />
+          </label>
+          <label>
+            Mailadresse
+            <input
+              name="email"
+              type="email"
+              required
+              autoComplete="username"
+              placeholder="name@kunde.ch"
+            />
+          </label>
+          <label>
+            Passwort
+            <input
+              name="password"
+              type="password"
+              required
+              autoComplete="current-password"
+              placeholder="Passwort"
+            />
+          </label>
+          {error && (
+            <p className="login-error" role="alert">
+              {error}
+            </p>
+          )}
+          <button className="primary-button" type="submit">
+            Kundenportal öffnen →
+          </button>
+        </form>
+      </section>
+      <div className="login-art" aria-hidden="true">
+        <span />
+        <i />
+        <b />
+      </div>
+    </main>
   );
 }
 
@@ -5569,6 +7104,341 @@ function PortalLogin({
   );
 }
 
+function CollectiveSupplierOffer({
+  request,
+  onExit,
+  submitting,
+  setSubmitting,
+  submissionError,
+  setSubmissionError,
+}: {
+  request: DocumentRecord;
+  onExit: () => void;
+  submitting: boolean;
+  setSubmitting: (value: boolean) => void;
+  submissionError: string;
+  setSubmissionError: (value: string) => void;
+}) {
+  const items = request.items ?? [];
+  const [prices, setPrices] = useState<
+    Record<string, { unit: string; total: string }>
+  >({});
+  const [pricesCalculated, setPricesCalculated] = useState(false);
+  const [priceError, setPriceError] = useState("");
+  const [gzdChoices, setGzdChoices] = useState<Record<number, string>>(
+    Object.fromEntries(
+      items.map((item) => [item.articleId, item.printFile || ""]),
+    ),
+  );
+  const [gzdUploads, setGzdUploads] = useState<
+    Record<number, { name: string; url: string }>
+  >({});
+  const [gzdUploading, setGzdUploading] = useState<Record<number, boolean>>({});
+  const [deliveryDate, setDeliveryDate] = useState("");
+  const [deliveryNote, setDeliveryNote] = useState("");
+  const [note, setNote] = useState("");
+  const priceKey = (articleId: number, quantity: number) =>
+    `${articleId}:${quantity}`;
+  function calculatePrices() {
+    const next: Record<string, { unit: string; total: string }> = {};
+    try {
+      for (const item of items)
+        for (const quantity of item.requestedQuantities ?? [item.quantity]) {
+          const key = priceKey(item.articleId, quantity);
+          const row = prices[key] ?? { unit: "", total: "" };
+          const completed = completeSupplierTier(quantity, row.unit, row.total);
+          next[key] = {
+            unit: completed.unitPrice.toFixed(6),
+            total: completed.supplierTotal.toFixed(2),
+          };
+        }
+      setPrices(next);
+      setPricesCalculated(true);
+      setPriceError("");
+    } catch (error) {
+      setPricesCalculated(false);
+      setPriceError(
+        error instanceof Error
+          ? error.message
+          : "Die Staffelpreise konnten nicht berechnet werden.",
+      );
+    }
+  }
+  return (
+    <main className="supplier-portal">
+      <header className="portal-header">
+        <div className="brand brand--portal">
+          <Monogram small />
+          <span>printcenter</span>
+        </div>
+        <button className="portal-button" onClick={onExit}>
+          Schliessen
+        </button>
+      </header>
+      <section className="supplier-portal-content collective-supplier-content">
+        <p className="eyebrow">SAMMELANFRAGE · {request.number}</p>
+        <h1>{items.length} Artikel offerieren.</h1>
+        <p className="supplier-lead">
+          Bitte erfassen Sie die Staffelpreise und das Gut zum Druck pro
+          Artikel. Das verbindliche Lieferdatum gilt für die gesamte Offerte.
+        </p>
+        <div className="supplier-request-box">
+          <p className="eyebrow">ANFRAGEANGABEN</p>
+          <p>
+            Wunsch-Lieferdatum: <strong>{request.deliveryDate || "auf Anfrage"}</strong>
+            {"\n"}
+            {request.requestText || request.note || "Keine Zusatzinformationen"}
+          </p>
+          {request.pdfUrl && (
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() =>
+                downloadDocumentPdf(request.pdfUrl!, request.number)
+              }
+            >
+              Sammelanfrage-PDF herunterladen
+            </button>
+          )}
+        </div>
+        <form
+          className="supplier-offer-form collective-supplier-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!pricesCalculated || !deliveryDate || submitting) return;
+            setSubmitting(true);
+            setSubmissionError("");
+            window.dispatchEvent(
+              new CustomEvent("printcenter:supplier-offer", {
+                detail: {
+                  requestId: request.id,
+                  deliveryDate,
+                  deliveryNote,
+                  note,
+                  items: items.map((item) => {
+                    const choice = gzdChoices[item.articleId] || "";
+                    const upload = gzdUploads[item.articleId];
+                    return {
+                      articleId: item.articleId,
+                      options: (item.requestedQuantities ?? [item.quantity]).map(
+                        (quantity) => {
+                          const price = prices[priceKey(item.articleId, quantity)];
+                          return {
+                            quantity,
+                            unitPrice: Number(price.unit),
+                            supplierTotal: Number(price.total),
+                          };
+                        },
+                      ),
+                      gzd: choice === "__upload__" ? upload?.name : choice,
+                      gzdUrl:
+                        choice === "__upload__"
+                          ? upload?.url
+                          : choice === item.printFile
+                            ? item.printFileUrl
+                            : undefined,
+                    };
+                  }),
+                },
+              }),
+            );
+          }}
+        >
+          {items.map((item, itemIndex) => {
+            const quantities = item.requestedQuantities ?? [item.quantity];
+            const choice = gzdChoices[item.articleId] || "";
+            return (
+              <fieldset className="collective-supplier-item" key={item.articleId}>
+                <legend>
+                  {itemIndex + 1}. {item.article} · {item.sku}
+                </legend>
+                {item.printFile && item.printFileUrl && (
+                  <a
+                    className="text-button"
+                    href={item.printFileUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Kunden-GzD ansehen ↗
+                  </a>
+                )}
+                <div className="supplier-tier-prices">
+                  <div className="supplier-tier-head">
+                    <span>Menge</span>
+                    <span>Einzelpreis in CHF</span>
+                    <span>Gesamtpreis in CHF</span>
+                  </div>
+                  {quantities.map((quantity) => {
+                    const key = priceKey(item.articleId, quantity);
+                    const row = prices[key] ?? { unit: "", total: "" };
+                    return (
+                      <div className="supplier-tier-row" key={quantity}>
+                        <strong>{quantity} Stück</strong>
+                        <label>
+                          <span>Einzelpreis</span>
+                          <input
+                            aria-label={`Einzelpreis ${item.sku}, ${quantity} Stück`}
+                            type="number"
+                            min="0.000001"
+                            step="0.000001"
+                            value={row.unit}
+                            onChange={(event) => {
+                              setPricesCalculated(false);
+                              setPrices((current) => ({
+                                ...current,
+                                [key]: { ...row, unit: event.target.value },
+                              }));
+                            }}
+                          />
+                        </label>
+                        <label>
+                          <span>Gesamtpreis</span>
+                          <input
+                            aria-label={`Gesamtpreis ${item.sku}, ${quantity} Stück`}
+                            type="number"
+                            min="0.01"
+                            step="0.01"
+                            value={row.total}
+                            onChange={(event) => {
+                              setPricesCalculated(false);
+                              setPrices((current) => ({
+                                ...current,
+                                [key]: { ...row, total: event.target.value },
+                              }));
+                            }}
+                          />
+                        </label>
+                      </div>
+                    );
+                  })}
+                </div>
+                <label className="supplier-full-field supplier-gzd-field">
+                  GzD für diesen Artikel bestätigen oder hochladen
+                  <select
+                    value={choice}
+                    onChange={(event) =>
+                      setGzdChoices((current) => ({
+                        ...current,
+                        [item.articleId]: event.target.value,
+                      }))
+                    }
+                  >
+                    <option value="">Kein GzD mitsenden</option>
+                    {item.printFile && (
+                      <option value={item.printFile}>
+                        Kunden-GzD bestätigen · {item.printFile}
+                      </option>
+                    )}
+                    <option value="__upload__">Neues GzD hochladen</option>
+                  </select>
+                  {choice === "__upload__" && (
+                    <input
+                      type="file"
+                      required
+                      accept=".pdf,image/*,.ai,.eps,.zip"
+                      onChange={async (event) => {
+                        const file = event.target.files?.[0];
+                        if (!file) return;
+                        setGzdUploading((current) => ({
+                          ...current,
+                          [item.articleId]: true,
+                        }));
+                        try {
+                          const upload = await uploadStoredFile(file);
+                          setGzdUploads((current) => ({
+                            ...current,
+                            [item.articleId]: upload,
+                          }));
+                        } catch (error) {
+                          setSubmissionError(
+                            error instanceof Error
+                              ? error.message
+                              : "Das GzD konnte nicht gespeichert werden.",
+                          );
+                        } finally {
+                          setGzdUploading((current) => ({
+                            ...current,
+                            [item.articleId]: false,
+                          }));
+                        }
+                      }}
+                    />
+                  )}
+                  <small>
+                    {gzdUploading[item.articleId]
+                      ? "Datei wird gespeichert …"
+                      : gzdUploads[item.articleId]?.name ||
+                        (choice && choice !== "__upload__" ? choice : "Optional")}
+                  </small>
+                </label>
+              </fieldset>
+            );
+          })}
+          {priceError && (
+            <p className="login-error supplier-price-message" role="alert">
+              {priceError}
+            </p>
+          )}
+          {submissionError && (
+            <p className="login-error supplier-price-message" role="alert">
+              {submissionError}
+            </p>
+          )}
+          <button
+            className="secondary-button supplier-calculate-button"
+            type="button"
+            onClick={calculatePrices}
+          >
+            Alle Preise speichern &amp; berechnen
+          </button>
+          <label className="supplier-full-field">
+            Verbindliches Lieferdatum für die gesamte Offerte
+            <input
+              type="date"
+              value={deliveryDate}
+              min={new Date().toISOString().slice(0, 10)}
+              onChange={(event) => setDeliveryDate(event.target.value)}
+              required
+            />
+          </label>
+          <label className="supplier-full-field">
+            Optionale Bemerkung zum Lieferdatum
+            <textarea
+              value={deliveryNote}
+              onChange={(event) => setDeliveryNote(event.target.value)}
+              rows={2}
+            />
+          </label>
+          <label className="supplier-full-field">
+            Nachricht an Printcenter
+            <textarea
+              value={note}
+              onChange={(event) => setNote(event.target.value)}
+              rows={3}
+            />
+          </label>
+          <button
+            className="primary-button"
+            type="submit"
+            disabled={
+              !pricesCalculated ||
+              submitting ||
+              Object.values(gzdUploading).some(Boolean) ||
+              items.some(
+                (item) =>
+                  gzdChoices[item.articleId] === "__upload__" &&
+                  !gzdUploads[item.articleId],
+              )
+            }
+          >
+            {submitting ? "Offerte wird übermittelt …" : "Sammelofferte senden →"}
+          </button>
+        </form>
+      </section>
+    </main>
+  );
+}
+
 function SupplierPortal({
   request,
   onExit,
@@ -5587,6 +7457,67 @@ function SupplierPortal({
   const [deliveryDate, setDeliveryDate] = useState("");
   const [deliveryNote, setDeliveryNote] = useState("");
   const [note, setNote] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [submissionError, setSubmissionError] = useState("");
+  const [submittedOfferNumber, setSubmittedOfferNumber] = useState("");
+  useEffect(() => {
+    const onSubmissionResult = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          status: "success" | "error";
+          offerNumber?: string;
+          message?: string;
+        }>
+      ).detail;
+      setSubmitting(false);
+      if (detail.status === "success") {
+        setSubmissionError("");
+        setSubmittedOfferNumber(detail.offerNumber || "Angebot");
+      } else {
+        setSubmissionError(
+          detail.message || "Die Offerte konnte nicht übermittelt werden.",
+        );
+      }
+    };
+    window.addEventListener(
+      "printcenter:supplier-offer-result",
+      onSubmissionResult,
+    );
+    return () =>
+      window.removeEventListener(
+        "printcenter:supplier-offer-result",
+        onSubmissionResult,
+      );
+  }, []);
+  if (submittedOfferNumber)
+    return (
+      <main className="supplier-portal supplier-success-page">
+        <header className="portal-header">
+          <div className="brand brand--portal">
+            <Monogram small />
+            <span>printcenter</span>
+          </div>
+          <button className="portal-button" onClick={onExit}>
+            Schliessen
+          </button>
+        </header>
+        <section className="supplier-success-card" role="status">
+          <span className="supplier-success-mark" aria-hidden="true">
+            ✓
+          </span>
+          <p className="eyebrow">OK · OFFERTE ÜBERMITTELT</p>
+          <h1>Vielen Dank.</h1>
+          <p>
+            Ihre Offerte <strong>{submittedOfferNumber}</strong> wurde
+            erfolgreich an Printcenter übermittelt. Sie müssen nichts weiter
+            unternehmen.
+          </p>
+          <button className="primary-button" type="button" onClick={onExit}>
+            Seite schliessen
+          </button>
+        </section>
+      </main>
+    );
   if (!request)
     return (
       <main className="backend-login">
@@ -5599,6 +7530,17 @@ function SupplierPortal({
           </p>
         </section>
       </main>
+    );
+  if (request.items?.length)
+    return (
+      <CollectiveSupplierOffer
+        request={request}
+        onExit={onExit}
+        submitting={submitting}
+        setSubmitting={setSubmitting}
+        submissionError={submissionError}
+        setSubmissionError={setSubmissionError}
+      />
     );
   const quantities = Array.from(
     new Set(
@@ -5711,13 +7653,15 @@ function SupplierPortal({
           className="supplier-offer-form"
           onSubmit={(event) => {
             event.preventDefault();
-            if (!pricesCalculated || !deliveryDate) return;
+            if (!pricesCalculated || !deliveryDate || submitting) return;
             const options = quantities.map((quantity) => ({
               quantity,
               unitPrice: Number(prices[quantity].unit),
               supplierTotal: Number(prices[quantity].total),
             }));
             const gzd = gzdChoice === "__upload__" ? gzdUpload : gzdChoice;
+            setSubmitting(true);
+            setSubmissionError("");
             window.dispatchEvent(
               new CustomEvent("printcenter:supplier-offer", {
                 detail: {
@@ -5782,6 +7726,11 @@ function SupplierPortal({
           {priceError && (
             <p className="login-error supplier-price-message" role="alert">
               {priceError}
+            </p>
+          )}
+          {submissionError && (
+            <p className="login-error supplier-price-message" role="alert">
+              {submissionError}
             </p>
           )}
           {pricesCalculated && (
@@ -5893,10 +7842,11 @@ function SupplierPortal({
             disabled={
               !pricesCalculated ||
               gzdUploading ||
+              submitting ||
               (gzdChoice === "__upload__" && !gzdUpload)
             }
           >
-            Offerte senden →
+            {submitting ? "Offerte wird übermittelt …" : "Offerte senden →"}
           </button>
         </form>
       </section>
@@ -6153,6 +8103,31 @@ function LegacySettingsView({
               </label>
             </fieldset>
           ))}
+          <fieldset className="employee-login-template-fieldset">
+            <legend>Mitarbeiter-Zugang</legend>
+            <label>
+              Betreff
+              <input
+                name="employeeLoginSubject"
+                defaultValue={workflow.employeeLoginSubject}
+                required
+              />
+            </label>
+            <label>
+              E-Mail-Text
+              <textarea
+                name="employeeLoginTemplate"
+                defaultValue={workflow.employeeLoginTemplate}
+                rows={9}
+                required
+              />
+            </label>
+            <small className="muted">
+              Platzhalter: {"{company}"} {"{salutation}"} {"{firstName}"}{" "}
+              {"{lastName}"} {"{employee}"} {"{email}"} {"{password}"}{" "}
+              {"{portalUrl}"}
+            </small>
+          </fieldset>
           <label>
             Betreff Lieferantenofferte
             <input
@@ -6168,14 +8143,13 @@ function LegacySettingsView({
               defaultValue={workflow.offerEmail}
             />
           </label>
-          <label>
-            Bestellung senden an
-            <input
-              name="orderEmail"
-              type="email"
-              defaultValue={workflow.orderEmail}
-            />
-          </label>
+          <div className="workflow-order-recipient">
+            <strong>Empfänger für Kundenbestellungen</strong>
+            <p>
+              Bestellungen werden automatisch an die E-Mail-Adresse des unter
+              E-Mail-Einstellungen markierten Standardabsenders gesendet.
+            </p>
+          </div>
           <button className="primary-button" type="submit">
             Vorlagen, Anhänge &amp; Empfänger speichern
           </button>
@@ -6235,6 +8209,7 @@ type SettingsProps = {
   users: BackendUser[];
   currentUser: BackendUser;
   workflow: WorkflowSettings;
+  onStateImported: (state: PersistedState) => void;
   onWorkflowSave: (event: FormEvent<HTMLFormElement>) => void;
   onCreate: (event: FormEvent<HTMLFormElement>) => void;
   onEdit: (id: number, name: string, email: string, password: string) => void;
@@ -6257,25 +8232,19 @@ const csvTemplates = {
     label: "Kunden",
     filename: "printcenter-kunden.csv",
     content:
-      "customer_number;name;salutation;first_name;last_name;main_email;phone;street;postal_code;city;country;markup_percent\nK-10050;Muster AG;Frau;Erika;Muster;info@muster.ch;+41 44 000 00 00;Musterstrasse 1;8000;Zürich;Schweiz;12",
-  },
-  employees: {
-    label: "Kundenmitarbeiter",
-    filename: "printcenter-kundenmitarbeiter.csv",
-    content:
-      "customer_number;salutation;first_name;last_name;email;phone;password;mail_to_main\nK-10050;Herr;Max;Muster;max@muster.ch;+41 79 000 00 00;Startpasswort;ja",
+      "customer_number;name;salutation;first_name;last_name;main_email;phone;street;postal_code;city;country;markup_percent;employee_1_salutation;employee_1_first_name;employee_1_last_name;employee_1_email;employee_1_phone;employee_1_password;employee_1_mail_to_main;employee_2_salutation;employee_2_first_name;employee_2_last_name;employee_2_email;employee_2_phone;employee_2_password;employee_2_mail_to_main;employee_3_salutation;employee_3_first_name;employee_3_last_name;employee_3_email;employee_3_phone;employee_3_password;employee_3_mail_to_main\nK-10050;Muster AG;Frau;Erika;Muster;info@muster.ch;+41 44 000 00 00;Musterstrasse 1;8000;Zürich;Schweiz;12;Herr;Max;Muster;max@muster.ch;+41 79 000 00 00;Startpasswort;ja;Frau;Lina;Muster;lina@muster.ch;+41 79 000 00 01;Startpasswort;nein;;;;;;;",
   },
   suppliers: {
     label: "Lieferanten",
     filename: "printcenter-lieferanten.csv",
     content:
-      "supplier_number;name;group;contact;email;phone;lead_time\nL-2060;Muster Druck AG;Druck;Erika Beispiel;produktion@muster-druck.ch;+41 44 000 00 01;5 Arbeitstage",
+      "supplier_number;name;group;contact;email;phone\nL-2060;Muster Druck AG;Druck;Erika Beispiel;produktion@muster-druck.ch;+41 44 000 00 01",
   },
   articles: {
     label: "Artikel",
     filename: "printcenter-artikel.csv",
     content:
-      "sku;name;customer_number;supplier_or_group;stock;reorder_point;unit_price;tier_1;tier_2;tier_3;tier_4;tier_5\nART-100001;Musterartikel;K-10050;Muster Druck AG;100;25;0.45;100;250;500;1000;2000",
+      "sku;designation_1;designation_2;customer_number;supplier_or_group;stock;reorder_point;unit_price\nART-100001;Musterartikel;Ausführung A4;K-10050;Muster Druck AG;100;25;0.45",
   },
 } as const;
 
@@ -6331,20 +8300,49 @@ function SettingsView(props: SettingsProps) {
       )}
       {section === "E-Mail-Einstellungen" && <EmailSettingsPanel />}
       {section === "Import / Export" && (
-        <ImportExportSettings workflow={props.workflow} />
+        <ImportExportSettings
+          workflow={props.workflow}
+          onStateImported={props.onStateImported}
+        />
       )}
       {section === "Anbindungen" && <IntegrationSettingsPanel />}
     </section>
   );
 }
 
-function ImportExportSettings({ workflow }: { workflow: WorkflowSettings }) {
+function ImportExportSettings({
+  workflow,
+  onStateImported,
+}: {
+  workflow: WorkflowSettings;
+  onStateImported: (state: PersistedState) => void;
+}) {
   const [importType, setImportType] =
     useState<keyof typeof csvTemplates>("customers");
   const [message, setMessage] = useState("");
+  const [messageKind, setMessageKind] = useState<
+    "progress" | "success" | "error"
+  >("progress");
+  const [progress, setProgress] = useState(0);
   const [busy, setBusy] = useState(false);
+  const updateImportProgress = async (
+    processed: number,
+    total: number,
+    start = 25,
+    end = 85,
+  ) => {
+    if (processed !== total && processed % 25 !== 0) return;
+    const ratio = total ? processed / total : 1;
+    setProgress(Math.round(start + (end - start) * ratio));
+    await new Promise<void>((resolve) =>
+      window.requestAnimationFrame(() => resolve()),
+    );
+  };
   async function exportBackup() {
     setBusy(true);
+    setProgress(10);
+    setMessageKind("progress");
+    setMessage("Datensicherung wird vorbereitet …");
     try {
       const [state, integrationSettings] = await Promise.all([
         apiRequest<PersistedState>("/api/state"),
@@ -6373,8 +8371,11 @@ function ImportExportSettings({ workflow }: { workflow: WorkflowSettings }) {
         ),
         "application/json;charset=utf-8",
       );
+      setProgress(100);
+      setMessageKind("success");
       setMessage("Das vollständige Backup wurde heruntergeladen.");
     } catch (error) {
+      setMessageKind("error");
       setMessage(
         error instanceof Error
           ? error.message
@@ -6387,6 +8388,9 @@ function ImportExportSettings({ workflow }: { workflow: WorkflowSettings }) {
   async function importBackup(file?: File) {
     if (!file) return;
     setBusy(true);
+    setProgress(5);
+    setMessageKind("progress");
+    setMessage(`Backup „${file.name}“ wird gelesen …`);
     try {
       const parsed = JSON.parse(await file.text()) as {
         state?: PersistedState;
@@ -6401,116 +8405,192 @@ function ImportExportSettings({ workflow }: { workflow: WorkflowSettings }) {
         !Array.isArray(state.backendUsers)
       )
         throw new Error("Die Datei ist kein gültiges Printcenter-Backup.");
+      setProgress(35);
+      setMessage("Backup wurde geprüft. Daten werden gespeichert …");
+      const nextState: PersistedState = {
+        ...state,
+        workflowSettings: {
+          ...workflow,
+          ...(state.workflowSettings ?? {}),
+        },
+      };
       await apiRequest<{ ok: boolean }>("/api/state", {
         method: "PUT",
-        body: JSON.stringify({
-          ...state,
-          workflowSettings: state.workflowSettings ?? workflow,
-        }),
+        body: JSON.stringify(nextState),
       });
+      setProgress(85);
       if (parsed.integrationSettings)
         await apiRequest<IntegrationSettings>("/api/integrations", {
           method: "PUT",
           body: JSON.stringify(parsed.integrationSettings),
         });
-      window.location.reload();
+      onStateImported(nextState);
+      setProgress(100);
+      setMessageKind("success");
+      setMessage(
+        `Backup erfolgreich importiert: ${nextState.customers.length} Kunden, ${nextState.suppliers.length} Lieferanten, ${nextState.articles.length} Artikel und ${nextState.documents.length} Belege. Die Sitzung bleibt aktiv.`,
+      );
     } catch (error) {
+      setMessageKind("error");
       setMessage(
         error instanceof Error
           ? error.message
           : "Das Backup konnte nicht importiert werden.",
       );
+    } finally {
       setBusy(false);
     }
   }
   async function importCsvFile(file?: File) {
     if (!file) return;
     setBusy(true);
+    setProgress(5);
+    setMessageKind("progress");
+    setMessage(`„${file.name}“ wird gelesen …`);
     try {
       const rows = parseCsv(await file.text());
       if (!rows.length)
         throw new Error("Die CSV-Datei enthält keine Datenzeilen.");
+      const requiredHeaders: Record<keyof typeof csvTemplates, string[]> = {
+        customers: ["customer_number", "name", "main_email"],
+        suppliers: ["supplier_number", "name", "group"],
+        articles: [
+          "sku",
+          "designation_1",
+          "designation_2",
+          "customer_number",
+          "supplier_or_group",
+        ],
+      };
+      const missingHeaders = requiredHeaders[importType].filter(
+        (header) => !(header in rows[0]),
+      );
+      if (missingHeaders.length)
+        throw new Error(
+          `Falsche Vorlage: Folgende Spalten fehlen: ${missingHeaders.join(", ")}.`,
+        );
+      setProgress(15);
+      setMessage(
+        `${rows.length} Zeilen erkannt. Bestehende Daten werden geprüft …`,
+      );
       const state = await apiRequest<PersistedState>("/api/state");
       let imported = 0;
+      const skippedReasons = new Map<string, number>();
+      const skip = (reason: string) =>
+        skippedReasons.set(reason, (skippedReasons.get(reason) ?? 0) + 1);
       if (importType === "customers") {
-        let nextId = Math.max(0, ...state.customers.map((item) => item.id)) + 1;
-        for (const row of rows) {
-          const number = row.customer_number || `K-${10000 + nextId}`;
-          if (
-            !row.name ||
-            state.customers.some((item) => item.number === number)
-          )
-            continue;
-          state.customers.push({
-            id: nextId++,
-            number,
-            name: row.name,
-            contactSalutation: (row.salutation || "Divers") as Salutation,
-            contactFirstName: row.first_name || "",
-            contactLastName: row.last_name || "",
-            email: row.main_email || "",
-            phone: row.phone || "",
-            street: row.street || "",
-            postalCode: row.postal_code || "",
-            city: row.city || "",
-            country: row.country || "Schweiz",
-            markup: Number(row.markup_percent) || 0,
-            status: "Aktiv",
-            turnover: 0,
-            employees: [],
-          });
-          imported += 1;
-        }
-      }
-      if (importType === "employees") {
-        let nextId =
+        let nextCustomerId =
+          Math.max(0, ...state.customers.map((item) => item.id)) + 1;
+        let nextEmployeeId =
           Math.max(
             0,
             ...state.customers.flatMap((customer) =>
               customer.employees.map((item) => item.id),
             ),
           ) + 1;
-        for (const row of rows) {
-          const customer = state.customers.find(
-            (item) => item.number === row.customer_number,
+        for (const [rowIndex, row] of rows.entries()) {
+          const number =
+            row.customer_number || `K-${10000 + nextCustomerId}`;
+          let customer = state.customers.find(
+            (item) => item.number === number,
           );
-          const duplicate = state.customers.some((item) =>
-            item.employees.some(
-              (employee) =>
-                employee.email.toLowerCase() === row.email?.toLowerCase(),
-            ),
-          );
-          const employeeName =
-            [row.first_name, row.last_name].filter(Boolean).join(" ") ||
-            row.name;
-          if (!customer || !employeeName || !row.email || duplicate) continue;
-          customer.employees.push({
-            id: nextId++,
-            name: employeeName,
-            salutation: (row.salutation || "Divers") as Salutation,
-            firstName:
-              row.first_name || splitPersonName(employeeName).firstName,
-            lastName: row.last_name || splitPersonName(employeeName).lastName,
-            email: row.email.toLowerCase(),
-            login: row.email.toLowerCase(),
-            phone: row.phone || "",
-            password: row.password || "portal",
-            mailToMain: ["ja", "yes", "1", "true"].includes(
-              (row.mail_to_main || "").toLowerCase(),
-            ),
-          });
-          imported += 1;
+          let rowImported = 0;
+          if (!customer && row.name) {
+            customer = {
+              id: nextCustomerId++,
+              number,
+              name: row.name,
+              contactSalutation: (row.salutation || "Divers") as Salutation,
+              contactFirstName: row.first_name || "",
+              contactLastName: row.last_name || "",
+              email: row.main_email || "",
+              phone: row.phone || "",
+              street: row.street || "",
+              postalCode: row.postal_code || "",
+              city: row.city || "",
+              country: row.country || "Schweiz",
+              markup: Number(row.markup_percent) || 0,
+              status: "Aktiv",
+              turnover: 0,
+              employees: [],
+            };
+            state.customers.push(customer);
+            imported += 1;
+            rowImported += 1;
+          }
+          if (!customer) skip("Kundenname fehlt");
+          else {
+            for (
+              let employeeIndex = 1;
+              employeeIndex <= 3;
+              employeeIndex += 1
+            ) {
+              const prefix = `employee_${employeeIndex}_`;
+              const email = String(row[`${prefix}email`] || "")
+                .trim()
+                .toLowerCase();
+              const firstName = String(
+                row[`${prefix}first_name`] || "",
+              ).trim();
+              const lastName = String(
+                row[`${prefix}last_name`] || "",
+              ).trim();
+              const employeeName = [firstName, lastName]
+                .filter(Boolean)
+                .join(" ");
+              const hasEmployeeData = Boolean(email || employeeName);
+              if (!hasEmployeeData) continue;
+              if (!email || !employeeName) {
+                skip("Unvollständiger Mitarbeiterzugang");
+                continue;
+              }
+              const duplicate = state.customers.some((item) =>
+                item.employees.some(
+                  (employee) => employee.email.toLowerCase() === email,
+                ),
+              );
+              if (duplicate) {
+                skip("Mitarbeiter-Mail bereits vorhanden");
+                continue;
+              }
+              customer.employees.push({
+                id: nextEmployeeId++,
+                name: employeeName,
+                salutation: (row[`${prefix}salutation`] ||
+                  "Divers") as Salutation,
+                firstName,
+                lastName,
+                email,
+                login: email,
+                phone: row[`${prefix}phone`] || "",
+                password: row[`${prefix}password`] || "portal",
+                mailToMain: ["ja", "yes", "1", "true"].includes(
+                  String(row[`${prefix}mail_to_main`] || "").toLowerCase(),
+                ),
+              });
+              imported += 1;
+              rowImported += 1;
+            }
+          }
+          if (!rowImported && customer)
+            skip("Kunde und Mitarbeiter bereits vorhanden");
+          await updateImportProgress(rowIndex + 1, rows.length);
         }
       }
       if (importType === "suppliers") {
         let nextId = Math.max(0, ...state.suppliers.map((item) => item.id)) + 1;
-        for (const row of rows) {
+        for (const [rowIndex, row] of rows.entries()) {
           const number = row.supplier_number || `L-${2000 + nextId}`;
-          if (
-            !row.name ||
-            state.suppliers.some((item) => item.number === number)
-          )
+          if (!row.name) {
+            skip("Lieferantenname fehlt");
+            await updateImportProgress(rowIndex + 1, rows.length);
             continue;
+          }
+          if (state.suppliers.some((item) => item.number === number)) {
+            skip("Lieferantennummer bereits vorhanden");
+            await updateImportProgress(rowIndex + 1, rows.length);
+            continue;
+          }
           const group = row.group || "Ohne Gruppe";
           if (group !== "Ohne Gruppe" && !state.groups.includes(group))
             state.groups.push(group);
@@ -6522,47 +8602,63 @@ function ImportExportSettings({ workflow }: { workflow: WorkflowSettings }) {
             contact: row.contact || "",
             email: row.email || "",
             phone: row.phone || "",
-            leadTime: row.lead_time || "auf Anfrage",
           });
           imported += 1;
+          await updateImportProgress(rowIndex + 1, rows.length);
         }
       }
       if (importType === "articles") {
         let nextId = Math.max(0, ...state.articles.map((item) => item.id)) + 1;
-        for (const row of rows) {
-          if (
-            !row.name ||
-            !row.sku ||
-            state.articles.some((item) => item.sku === row.sku)
-          )
+        for (const [rowIndex, row] of rows.entries()) {
+          const designation1 = row.designation_1 || row.name || "";
+          const designation2 = row.designation_2 || "";
+          if (!designation1 || !row.sku) {
+            skip("SKU oder Bezeichnung 1 fehlt");
+            await updateImportProgress(rowIndex + 1, rows.length);
             continue;
+          }
+          if (state.articles.some((item) => item.sku === row.sku)) {
+            skip("SKU bereits vorhanden");
+            await updateImportProgress(rowIndex + 1, rows.length);
+            continue;
+          }
           const customer = state.customers.find(
             (item) => item.number === row.customer_number,
           );
+          if (!customer) {
+            skip("Kundennummer nicht gefunden");
+            await updateImportProgress(rowIndex + 1, rows.length);
+            continue;
+          }
           const supplierValue = row.supplier_or_group || "Nicht zugeordnet";
-          const supplier = state.groups.includes(supplierValue)
+          const supplierExists = state.suppliers.some(
+            (item) => item.name === supplierValue,
+          );
+          const groupExists = state.groups.includes(supplierValue);
+          if (
+            supplierValue !== "Nicht zugeordnet" &&
+            !supplierExists &&
+            !groupExists
+          ) {
+            skip("Lieferant oder Gruppe nicht gefunden");
+            await updateImportProgress(rowIndex + 1, rows.length);
+            continue;
+          }
+          const supplier = groupExists
             ? `group:${supplierValue}`
             : supplierValue;
           const stock = Number(row.stock) || 0;
-          const tiers = [
-            row.tier_1,
-            row.tier_2,
-            row.tier_3,
-            row.tier_4,
-            row.tier_5,
-          ]
-            .map(Number)
-            .filter((value) => value > 0);
           state.articles.push({
             id: nextId++,
             sku: row.sku,
-            name: row.name,
+            designation1,
+            designation2,
+            name: articleNameFromDesignations(designation1, designation2),
             customerId: customer?.id,
             supplier,
             stock,
             minimum: Number(row.reorder_point) || 0,
             unitPrice: Number(row.unit_price) || 0,
-            tierQuantities: tiers,
             stockHistory: [
               {
                 date: today(),
@@ -6574,23 +8670,42 @@ function ImportExportSettings({ workflow }: { workflow: WorkflowSettings }) {
             templates: [],
           });
           imported += 1;
+          await updateImportProgress(rowIndex + 1, rows.length);
         }
       }
+      const reasonSummary = [...skippedReasons.entries()]
+        .map(([reason, count]) => `${count}× ${reason}`)
+        .join("; ");
+      if (!imported)
+        throw new Error(
+          `Keine neuen Datensätze importiert.${reasonSummary ? ` Grund: ${reasonSummary}.` : ""}`,
+        );
+      setProgress(90);
+      setMessage(
+        `${imported} Datensätze vorbereitet. Änderungen werden dauerhaft gespeichert …`,
+      );
+      const nextState: PersistedState = {
+        ...state,
+        workflowSettings: {
+          ...workflow,
+          ...(state.workflowSettings ?? {}),
+        },
+      };
       await apiRequest<{ ok: boolean }>("/api/state", {
         method: "PUT",
-        body: JSON.stringify({
-          ...state,
-          workflowSettings: state.workflowSettings ?? workflow,
-        }),
+        body: JSON.stringify(nextState),
       });
+      onStateImported(nextState);
+      setProgress(100);
+      setMessageKind("success");
       setMessage(
-        `${imported} Datensätze wurden importiert. Die Ansicht wird neu geladen.`,
+        `${imported} Datensätze erfolgreich importiert.${reasonSummary ? ` Übersprungen: ${reasonSummary}.` : " Keine Zeilen wurden übersprungen."} Die Sitzung bleibt aktiv.`,
       );
-      window.setTimeout(() => window.location.reload(), 700);
     } catch (error) {
+      setMessageKind("error");
       setMessage(
         error instanceof Error
-          ? error.message
+          ? `Import fehlgeschlagen: ${error.message}`
           : "Die CSV-Datei konnte nicht importiert werden.",
       );
     } finally {
@@ -6599,6 +8714,28 @@ function ImportExportSettings({ workflow }: { workflow: WorkflowSettings }) {
   }
   return (
     <section className="import-export-layout">
+      {message && (
+        <section
+          className={`import-feedback import-feedback--${messageKind}`}
+          role={messageKind === "error" ? "alert" : "status"}
+          aria-live="polite"
+        >
+          <div className="import-feedback-heading">
+            <strong>
+              {messageKind === "progress"
+                ? "Import läuft"
+                : messageKind === "success"
+                  ? "Erfolgreich abgeschlossen"
+                  : "Import fehlgeschlagen"}
+            </strong>
+            <span>{progress}%</span>
+          </div>
+          <progress value={progress} max="100">
+            {progress}%
+          </progress>
+          <p>{message}</p>
+        </section>
+      )}
       <section className="panel backup-panel">
         <p className="eyebrow">VOLLSTÄNDIGE DATENSICHERUNG</p>
         <h2>Alle Datenbanken sichern</h2>
@@ -6698,15 +8835,9 @@ function ImportExportSettings({ workflow }: { workflow: WorkflowSettings }) {
         </div>
         <p className="muted">
           Bestehende Datensätze bleiben erhalten. Duplikate anhand Kundennummer,
-          Lieferantennummer, Login-Mail oder SKU werden übersprungen.
+          Lieferantennummer, Mitarbeiter-Mail oder SKU werden übersprungen.
         </p>
       </section>
-      {message && (
-        <p className="notice settings-message">
-          <span className="notice-mark">+</span>
-          {message}
-        </p>
-      )}
     </section>
   );
 }
@@ -6768,7 +8899,7 @@ function EmailSettingsPanel() {
   );
   const [productionSecretConfigured, setProductionSecretConfigured] =
     useState(false);
-  const [message, setMessage] = useState("Absenderprofile werden geladen …");
+  const [, setMessage] = useState("Absenderprofile werden geladen …");
   const [busy, setBusy] = useState(false);
 
   const load = async () => {
@@ -7141,14 +9272,13 @@ function EmailSettingsPanel() {
           )}
         </div>
       </form>
-      <p className="settings-message" role="status" aria-live="polite">{message}</p>
     </section>
   );
 }
 
 function IntegrationSettingsPanel() {
   const [settings, setSettings] = useState(emptyIntegrationSettings);
-  const [message, setMessage] = useState("Konfigurationen werden geladen …");
+  const [, setMessage] = useState("Konfigurationen werden geladen …");
   useEffect(() => {
     let active = true;
     void apiRequest<IntegrationSettings>("/api/integrations")
@@ -7342,7 +9472,6 @@ function IntegrationSettingsPanel() {
         </div>
       </section>
       <div className="integration-save">
-        <p>{message}</p>
         <button className="primary-button" type="submit">
           Anbindungen speichern
         </button>
