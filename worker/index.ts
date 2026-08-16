@@ -12,6 +12,7 @@ interface Env {
   DB: D1Database;
   FILES: R2Bucket;
   EMAIL_ENCRYPTION_KEY?: string;
+  PUBLIC_APP_ORIGIN?: string;
   IMAGES: {
     input(stream: ReadableStream): {
       transform(options: Record<string, unknown>): {
@@ -233,8 +234,20 @@ type FullState = {
 const json = (data: unknown, init?: ResponseInit) =>
   Response.json(data, { headers: { "Cache-Control": "no-store" }, ...init });
 
-function requestOrigins(request: Request, url: URL) {
+function publicAppOrigin(env: Env, url: URL) {
+  try {
+    const configured = new URL(env.PUBLIC_APP_ORIGIN || url.origin);
+    if (configured.protocol === "http:" || configured.protocol === "https:")
+      return configured.origin;
+  } catch {
+    // Eine ungültige Konfiguration fällt sicher auf den Worker-Ursprung zurück.
+  }
+  return url.origin;
+}
+
+function requestOrigins(request: Request, url: URL, env: Env) {
   const origins = new Set([url.origin]);
+  origins.add(publicAppOrigin(env, url));
   const forwardedHost = request.headers
     .get("X-Forwarded-Host")
     ?.split(",")[0]
@@ -255,9 +268,9 @@ function requestOrigins(request: Request, url: URL) {
   return origins;
 }
 
-const sameOriginRequest = (request: Request, url: URL) => {
+const sameOriginRequest = (request: Request, url: URL, env: Env) => {
   const origin = request.headers.get("Origin");
-  return !origin || requestOrigins(request, url).has(origin);
+  return !origin || requestOrigins(request, url, env).has(origin);
 };
 
 async function ensureDirectorySchema(db: D1Database) {
@@ -1155,7 +1168,7 @@ async function sendRequestEmails(
   env: Env,
   db: D1Database,
 ) {
-  if (!sameOriginRequest(request, url))
+  if (!sameOriginRequest(request, url, env))
     return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
 
   await ensureFullSchema(db);
@@ -1269,7 +1282,7 @@ async function sendRequestEmails(
   const quantitiesText = quantities
     .map((quantity) => `${quantity} Stück`)
     .join(", ");
-  const supplierLink = `${url.origin}/supplier-offer/${encodeURIComponent(supplierToken)}`;
+  const supplierLink = `${publicAppOrigin(env, url)}/supplier-offer/${encodeURIComponent(supplierToken)}`;
   const values = {
     supplier: targetLabel,
     customer: String(requestRow.customer_name),
@@ -1335,7 +1348,7 @@ async function sendRequestEmails(
     try {
       const fileUrl = new URL(String(body.printFileUrl), url.origin);
       if (
-        !requestOrigins(request, url).has(fileUrl.origin) ||
+        !requestOrigins(request, url, env).has(fileUrl.origin) ||
         !fileUrl.pathname.startsWith("/api/files/")
       )
         throw new Error("ungültiger Dateipfad");
@@ -1405,13 +1418,15 @@ async function sendRequestEmails(
 
 async function mailAttachmentFromStoredFile(
   env: Env,
-  origin: string,
+  origins: Set<string>,
   fileUrl: string,
   filename: string,
 ) {
-  const parsedUrl = new URL(fileUrl, origin);
+  const fallbackOrigin = origins.values().next().value;
+  if (!fallbackOrigin) throw new Error("ungültiger Dateipfad");
+  const parsedUrl = new URL(fileUrl, fallbackOrigin);
   if (
-    parsedUrl.origin !== origin ||
+    !origins.has(parsedUrl.origin) ||
     !parsedUrl.pathname.startsWith("/api/files/")
   )
     throw new Error("ungültiger Dateipfad");
@@ -1433,7 +1448,7 @@ async function sendCollectiveRequestEmails(
   env: Env,
   db: D1Database,
 ) {
-  if (!sameOriginRequest(request, url))
+  if (!sameOriginRequest(request, url, env))
     return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
   await ensureFullSchema(db);
   const customerId = Number(body.customerId);
@@ -1594,7 +1609,7 @@ async function sendCollectiveRequestEmails(
       printFileUrl: item.printFileUrl || undefined,
     };
   });
-  const supplierLink = `${url.origin}/supplier-offer/${encodeURIComponent(supplierToken)}`;
+  const supplierLink = `${publicAppOrigin(env, url)}/supplier-offer/${encodeURIComponent(supplierToken)}`;
   const values = {
     supplier: targetLabel,
     customer: String(employee.customer_name),
@@ -1653,7 +1668,7 @@ async function sendCollectiveRequestEmails(
       try {
         const attachment = await mailAttachmentFromStoredFile(
           env,
-          url.origin,
+          requestOrigins(request, url, env),
           item.printFileUrl,
           `${item.sku}-${item.printFile}`,
         );
@@ -1713,7 +1728,7 @@ async function sendCollectiveOfferEmails(
   env: Env,
   db: D1Database,
 ) {
-  if (!sameOriginRequest(request, url))
+  if (!sameOriginRequest(request, url, env))
     return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
   await ensureFullSchema(db);
   const requestId = Number(body.requestId);
@@ -1877,7 +1892,7 @@ async function sendCollectiveOfferEmails(
   const markupAmount = (subtotal * markupPercent) / 100;
   const total = subtotal + markupAmount;
   const projectId = Number(requestRow.project_id || requestPayload.projectId || requestId);
-  const portalUrl = `${url.origin}/${encodeURIComponent(String(requestRow.customer_number))}`;
+  const portalUrl = `${publicAppOrigin(env, url)}/${encodeURIComponent(String(requestRow.customer_number))}`;
   const values = {
     supplier: requestPayload.supplier || "Lieferant",
     customer: String(requestRow.customer_name),
@@ -1935,7 +1950,7 @@ async function sendCollectiveOfferEmails(
       try {
         const attachment = await mailAttachmentFromStoredFile(
           env,
-          url.origin,
+          requestOrigins(request, url, env),
           item.supplierGzdUrl,
           `${item.sku}-${item.supplierGzd}`,
         );
@@ -1995,7 +2010,7 @@ async function sendOfferEmails(
   env: Env,
   db: D1Database,
 ) {
-  if (!sameOriginRequest(request, url))
+  if (!sameOriginRequest(request, url, env))
     return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
 
   await ensureFullSchema(db);
@@ -2132,7 +2147,7 @@ async function sendOfferEmails(
   const markupAmount = (subtotal * markupPercent) / 100;
   const total = subtotal + markupAmount;
   const projectId = Number(requestRow.project_id || requestPayload.projectId || requestId);
-  const portalUrl = `${url.origin}/${encodeURIComponent(String(requestRow.customer_number))}`;
+  const portalUrl = `${publicAppOrigin(env, url)}/${encodeURIComponent(String(requestRow.customer_number))}`;
   const values = {
     supplier: String(requestRow.supplier_name || requestPayload.supplier || "Lieferant"),
     customer: String(requestRow.customer_name),
@@ -2200,7 +2215,7 @@ async function sendOfferEmails(
         attachments.push(
           await mailAttachmentFromStoredFile(
             env,
-            url.origin,
+            requestOrigins(request, url, env),
             requestedGzdUrl,
             requestedGzdName,
           ),
@@ -2266,7 +2281,7 @@ async function sendOrderEmail(
   env: Env,
   db: D1Database,
 ) {
-  if (!sameOriginRequest(request, url))
+  if (!sameOriginRequest(request, url, env))
     return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
   await ensureFullSchema(db);
   const offerId = Number(body.offerId);
@@ -3246,7 +3261,7 @@ async function handleDirectoryApi(
       : await request.json<Record<string, unknown>>();
 
   if (url.pathname === "/api/portal-previews" && request.method === "POST") {
-    if (!sameOriginRequest(request, url))
+    if (!sameOriginRequest(request, url, env))
       return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
     const customerId = Number(body.customerId);
     const employeeId = Number(body.employeeId);
@@ -3326,7 +3341,7 @@ async function handleDirectoryApi(
     return sendOrderEmail(body, request, url, env, db);
 
   if (url.pathname.startsWith("/api/email-senders")) {
-    if (!sameOriginRequest(request, url))
+    if (!sameOriginRequest(request, url, env))
       return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
     try {
       if (url.pathname === "/api/email-senders" && request.method === "POST") {
@@ -3479,7 +3494,7 @@ async function handleDirectoryApi(
   }
 
   if (employeeLoginMailMatch && request.method === "POST") {
-    if (!sameOriginRequest(request, url))
+    if (!sameOriginRequest(request, url, env))
       return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
     const customerId = Number(employeeLoginMailMatch[1]);
     const employeeId = Number(employeeLoginMailMatch[2]);
@@ -3524,7 +3539,7 @@ async function handleDirectoryApi(
       employee: String(employee.name),
       email: String(employee.email),
       password: String(employee.password_hash),
-      portalUrl: `${url.origin}/${encodeURIComponent(String(employee.customer_number))}`,
+      portalUrl: `${publicAppOrigin(env, url)}/${encodeURIComponent(String(employee.customer_number))}`,
     };
     const subject = renderEmailTemplate(
       String(
