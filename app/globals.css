@@ -196,18 +196,58 @@ button {
   font-size: 15px;
   line-height: 0;
 }
-.profile {
-  border: 0;
-  width: 37px;
-  height: 37px;
+.profile-menu-wrap {
+  position: relative;
+}
+.profile-account-button {
+  min-width: 196px;
+  min-height: 46px;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 10px 6px 7px;
+  border: 1px solid var(--ink);
+  background: white;
+  color: var(--ink);
+  text-align: left;
+}
+.profile-account-button:hover,
+.profile-account-button[aria-expanded="true"] {
+  background: var(--ink);
+  color: white;
+}
+.profile-account-initials {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
   border-radius: 50%;
   color: white;
   background: var(--red);
-  font-size: 11px;
-  font-weight: 800;
+  font-size: 10px;
+  font-weight: 900;
 }
-.profile-menu-wrap {
-  position: relative;
+.profile-account-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.profile-account-copy small {
+  color: var(--red);
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: 1px;
+}
+.profile-account-copy strong {
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.profile-account-chevron {
+  font-size: 8px;
 }
 .profile-menu {
   position: absolute;
@@ -221,6 +261,9 @@ button {
   border: 1px solid var(--ink);
   background: white;
   box-shadow: 8px 8px 0 var(--red);
+}
+.profile-menu .eyebrow {
+  margin-bottom: 1px;
 }
 .profile-menu strong,
 .profile-menu small {
@@ -987,7 +1030,7 @@ button {
   color: white;
   background: var(--ink);
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-start;
   padding: 24px 6vw;
   font-size: 11px;
 }
@@ -1054,6 +1097,13 @@ button {
   .portal-button {
     padding: 8px 9px;
     font-size: 10px;
+  }
+  .profile-account-button {
+    min-width: 0;
+    grid-template-columns: 32px auto;
+  }
+  .profile-account-copy {
+    display: none;
   }
   .content {
     padding: 35px 5vw 50px;

@@ -2983,19 +2983,29 @@ export function PrintcenterApp({
             </button>
             <div className="profile-menu-wrap">
               <button
-                className="profile"
-                aria-label="Persönliche Einstellungen öffnen"
-                title="Persönliche Einstellungen"
+                className="profile-account-button"
+                aria-label="Mein Konto und persönliche Einstellungen öffnen"
+                title="Mein Konto und persönliche Einstellungen"
                 aria-expanded={profileMenuOpen}
                 onClick={() => setProfileMenuOpen((current) => !current)}
               >
-                {backendSession.name
-                  .split(" ")
-                  .map((part) => part[0])
-                  .join("")}
+                <span className="profile-account-initials" aria-hidden="true">
+                  {backendSession.name
+                    .split(" ")
+                    .map((part) => part[0])
+                    .join("")}
+                </span>
+                <span className="profile-account-copy">
+                  <small>MEIN KONTO</small>
+                  <strong>{backendSession.name}</strong>
+                </span>
+                <span className="profile-account-chevron" aria-hidden="true">
+                  {profileMenuOpen ? "▲" : "▼"}
+                </span>
               </button>
               {profileMenuOpen && (
                 <div className="profile-menu">
+                  <p className="eyebrow">PERSÖNLICHE EINSTELLUNGEN</p>
                   <strong>{backendSession.name}</strong>
                   <small>{backendSession.email}</small>
                   <button
@@ -3005,7 +3015,7 @@ export function PrintcenterApp({
                       setProfileSettingsOpen(true);
                     }}
                   >
-                    Meine Einstellungen
+                    Mail &amp; Passwort verwalten
                   </button>
                   <button
                     type="button"
@@ -6587,7 +6597,6 @@ function CustomerPortal({
       )}
       <footer className="portal-footer">
         <span>printcenter</span>
-        <span>Eine URL · eine persönliche Sicht · hello@printcenter.ch</span>
       </footer>
     </main>
   );

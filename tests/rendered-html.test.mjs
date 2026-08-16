@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 async function render(pathname = "/") {
@@ -103,4 +104,19 @@ test("never falls back to the backend login for an unknown customer number", asy
   assert.match(html, /Kundenlogin\./);
   assert.match(html, /Kundennummer/);
   assert.doesNotMatch(html, /BACKEND-ZUGANG|Backend anmelden\./);
+});
+
+test("keeps personal backend settings visible and removes the portal footer slogan", async () => {
+  const source = await readFile(
+    new URL("../app/page.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /MEIN KONTO/);
+  assert.match(source, /Mail &amp; Passwort verwalten/);
+  assert.match(source, /Backend-Passwort zurücksetzen/);
+  assert.doesNotMatch(
+    source,
+    /Eine URL · eine persönliche Sicht · hello@printcenter\.ch/,
+  );
 });
