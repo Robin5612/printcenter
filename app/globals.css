@@ -2721,6 +2721,29 @@ button {
   display: grid;
   grid-template-rows: auto 1fr;
 }
+.supplier-loading-page {
+  display: grid;
+  grid-template-rows: auto 1fr;
+}
+.supplier-loading-card {
+  align-self: center;
+  width: min(620px, calc(100% - 40px));
+  margin: 55px auto;
+  padding: clamp(34px, 7vw, 72px);
+  border: 2px solid var(--ink);
+  background: white;
+}
+.supplier-loading-card h1 {
+  margin: 8px 0 18px;
+  font-size: clamp(46px, 8vw, 78px);
+  line-height: 0.92;
+  letter-spacing: -3px;
+}
+.supplier-loading-card > p:not(.eyebrow) {
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.55;
+}
 .supplier-success-card {
   align-self: center;
   width: min(620px, calc(100% - 40px));

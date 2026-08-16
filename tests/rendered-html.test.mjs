@@ -86,6 +86,15 @@ test("keeps backend portal previews in a dedicated authorization state", async (
   assert.doesNotMatch(html, /Backend anmelden\.|Kundenlogin\./);
 });
 
+test("does not mark supplier links as expired while data is loading", async () => {
+  const response = await render("/supplier-offer/SUP-123456789");
+  assert.equal(response.status, 200);
+
+  const html = await response.text();
+  assert.match(html, /Anfrage wird geladen\./);
+  assert.doesNotMatch(html, /Link nicht mehr verfügbar|abgelaufen/);
+});
+
 test("never falls back to the backend login for an unknown customer number", async () => {
   const response = await render("/UNBEKANNT");
   assert.equal(response.status, 200);

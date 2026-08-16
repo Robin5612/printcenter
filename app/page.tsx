@@ -2863,6 +2863,7 @@ export function PrintcenterApp({
           item.status === "Versendet",
       )
     : undefined;
+  if (supplierRoute && !databaseReady) return <SupplierPortalLoading />;
   if (supplierRoute)
     return (
       <SupplierPortal request={supplierRequest} onExit={leaveSupplierPortal} />
@@ -8100,6 +8101,30 @@ function SupplierPortal({
             {submitting ? "Offerte wird übermittelt …" : "Offerte senden →"}
           </button>
         </form>
+      </section>
+    </main>
+  );
+}
+
+function SupplierPortalLoading() {
+  return (
+    <main className="supplier-portal supplier-loading-page">
+      <header className="portal-header">
+        <div className="brand brand--portal">
+          <Monogram small />
+          <span>printcenter</span>
+        </div>
+      </header>
+      <section className="supplier-loading-card" role="status">
+        <p className="eyebrow">LIEFERANTENLINK</p>
+        <h1>Anfrage wird geladen.</h1>
+        <p>
+          Der sichere Link und die zugehörigen Artikeldaten werden geprüft.
+        </p>
+        <span
+          className="preview-loading-bar"
+          aria-label="Lieferantenanfrage wird geladen"
+        />
       </section>
     </main>
   );
