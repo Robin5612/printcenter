@@ -1,0 +1,2293 @@
+/** Cloudflare Worker entry point for the vinext-starter template. */
+import {
+  handleImageOptimization,
+  DEFAULT_DEVICE_SIZES,
+  DEFAULT_IMAGE_SIZES,
+} from "vinext/server/image-optimization";
+import handler from "vinext/server/app-router-entry";
+
+interface Env {
+  ASSETS: Fetcher;
+  DB: D1Database;
+  FILES: R2Bucket;
+  EMAIL_ENCRYPTION_KEY?: string;
+  IMAGES: {
+    input(stream: ReadableStream): {
+      transform(options: Record<string, unknown>): {
+        output(options: {
+          format: string;
+          quality: number;
+        }): Promise<{ response(): Response }>;
+      };
+    };
+  };
+}
+
+interface ExecutionContext {
+  waitUntil(promise: Promise<unknown>): void;
+  passThroughOnException(): void;
+}
+
+type DirectoryCustomerRow = {
+  id: number;
+  customer_number: string;
+  name: string;
+  contact_salutation: string | null;
+  contact_first_name: string | null;
+  contact_last_name: string | null;
+  email: string | null;
+  phone: string | null;
+  street: string | null;
+  postal_code: string | null;
+  city: string | null;
+  country: string;
+  markup_percent: number;
+  status: string;
+};
+type DirectoryEmployeeRow = {
+  id: number;
+  customer_id: number;
+  name: string;
+  salutation: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  email: string;
+  phone: string | null;
+  login: string;
+  password_hash: string;
+  mail_to_main: number;
+};
+type DirectorySupplierRow = {
+  id: number;
+  supplier_number: string;
+  name: string;
+  contact_name: string | null;
+  email: string | null;
+  phone: string | null;
+  lead_time_days: number | null;
+  lead_time_text: string | null;
+  group_name: string | null;
+};
+type StateEmployee = {
+  id: number;
+  name: string;
+  salutation?: string;
+  firstName?: string;
+  lastName?: string;
+  email: string;
+  phone: string;
+  login: string;
+  password?: string;
+  mailToMain: boolean;
+};
+type StateCustomer = {
+  id: number;
+  number: string;
+  name: string;
+  contactSalutation?: string;
+  contactFirstName?: string;
+  contactLastName?: string;
+  email: string;
+  phone: string;
+  street: string;
+  postalCode: string;
+  city: string;
+  country: string;
+  markup: number;
+  status: string;
+  turnover: number;
+  employees: StateEmployee[];
+};
+type StateSupplier = {
+  id: number;
+  number: string;
+  name: string;
+  group: string;
+  contact: string;
+  email: string;
+  phone: string;
+  leadTime: string;
+};
+type StateArticle = {
+  id: number;
+  sku: string;
+  name: string;
+  customerId?: number;
+  supplier: string;
+  stock: number;
+  minimum: number;
+  unitPrice: number;
+  tierQuantities: number[];
+  stockHistory: Array<{
+    date: string;
+    change: number;
+    stock: number;
+    reason: string;
+  }>;
+  templates: Array<{ id: number; file: string; addedAt: string; url?: string }>;
+};
+type StateDocument = {
+  id: number;
+  number: string;
+  type: string;
+  customerId: number;
+  customer: string;
+  employeeId?: number;
+  employee: string;
+  supplier?: string;
+  supplierId?: number;
+  supplierToken?: string;
+  projectId?: number;
+  articleId?: number;
+  article: string;
+  quantity: number;
+  requestedQuantities?: number[];
+  unitPrice: number;
+  subtotal: number;
+  markupPercent: number;
+  markupAmount: number;
+  total: number;
+  date: string;
+  createdAt?: string;
+  deliveryDate?: string;
+  supplierLeadTime?: string;
+  supplierDeliveryDate?: string;
+  supplierDeliveryNote?: string;
+  bindingDeliveryConfirmationDue?: string;
+  note?: string;
+  requestText?: string;
+  documentText?: string;
+  attachDocument?: boolean;
+  attachGzd?: boolean;
+  printFile?: string;
+  printFileUrl?: string;
+  supplierGzd?: string;
+  supplierGzdUrl?: string;
+  supplierNote?: string;
+  gzdStatus?: string;
+  offerOptions?: Array<{
+    quantity: number;
+    unitPrice: number;
+    supplierTotal?: number;
+  }>;
+  status: string;
+};
+type StateBackendUser = {
+  id: number;
+  name: string;
+  email: string;
+  role: string;
+  password: string;
+  active: boolean;
+};
+type StateWorkflow = {
+  requestTemplate: string;
+  offerTemplate: string;
+  orderTemplate: string;
+  confirmationTemplate: string;
+  supplierOfferSubject: string;
+  offerEmail: string;
+  orderEmail: string;
+  attachRequestDocument: boolean;
+  attachRequestGzd: boolean;
+  attachOfferDocument: boolean;
+  attachOfferGzd: boolean;
+  attachOrderDocument: boolean;
+  attachOrderGzd: boolean;
+  attachConfirmationDocument: boolean;
+  attachConfirmationGzd: boolean;
+};
+type FullState = {
+  customers: StateCustomer[];
+  suppliers: StateSupplier[];
+  groups: string[];
+  articles: StateArticle[];
+  documents: StateDocument[];
+  backendUsers: StateBackendUser[];
+  workflowSettings: StateWorkflow;
+};
+
+const json = (data: unknown, init?: ResponseInit) =>
+  Response.json(data, { headers: { "Cache-Control": "no-store" }, ...init });
+
+async function ensureDirectorySchema(db: D1Database) {
+  await db.batch([
+    db.prepare(
+      "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+    ),
+    db.prepare(
+      "CREATE TABLE IF NOT EXISTS customers (id INTEGER PRIMARY KEY AUTOINCREMENT, customer_number TEXT NOT NULL UNIQUE, name TEXT NOT NULL, contact_name TEXT, contact_salutation TEXT, contact_first_name TEXT, contact_last_name TEXT, email TEXT, phone TEXT, street TEXT, postal_code TEXT, city TEXT, country TEXT NOT NULL DEFAULT 'Schweiz', markup_percent REAL NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    ),
+    db.prepare(
+      "CREATE TABLE IF NOT EXISTS customer_employees (id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER NOT NULL REFERENCES customers(id), name TEXT NOT NULL, salutation TEXT, first_name TEXT, last_name TEXT, email TEXT NOT NULL UNIQUE, phone TEXT, login TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, mail_to_main INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    ),
+    db.prepare(
+      "CREATE TABLE IF NOT EXISTS supplier_groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE)",
+    ),
+    db.prepare(
+      "CREATE TABLE IF NOT EXISTS suppliers (id INTEGER PRIMARY KEY AUTOINCREMENT, supplier_number TEXT NOT NULL UNIQUE, name TEXT NOT NULL, contact_name TEXT, email TEXT, phone TEXT, lead_time_days INTEGER, lead_time_text TEXT, group_id INTEGER REFERENCES supplier_groups(id) ON DELETE SET NULL)",
+    ),
+  ]);
+  await ensureColumn(db, "customers", "contact_salutation", "TEXT");
+  await ensureColumn(db, "customers", "contact_first_name", "TEXT");
+  await ensureColumn(db, "customers", "contact_last_name", "TEXT");
+  await ensureColumn(db, "customer_employees", "salutation", "TEXT");
+  await ensureColumn(db, "customer_employees", "first_name", "TEXT");
+  await ensureColumn(db, "customer_employees", "last_name", "TEXT");
+  await ensureColumn(db, "suppliers", "lead_time_text", "TEXT");
+  const marker = await db
+    .prepare("SELECT value FROM app_meta WHERE key = ?")
+    .bind("directory_seeded")
+    .first<{ value: string }>();
+  if (marker) return;
+  const counts = await db
+    .prepare(
+      "SELECT (SELECT COUNT(*) FROM customers) + (SELECT COUNT(*) FROM suppliers) AS total",
+    )
+    .first<{ total: number }>();
+  if (!counts?.total) {
+    await db.batch([
+      db
+        .prepare(
+          "INSERT OR IGNORE INTO supplier_groups (id, name) VALUES (?, ?)",
+        )
+        .bind(1, "Papier"),
+      db
+        .prepare(
+          "INSERT OR IGNORE INTO supplier_groups (id, name) VALUES (?, ?)",
+        )
+        .bind(2, "Veredelung"),
+      db
+        .prepare(
+          "INSERT OR IGNORE INTO supplier_groups (id, name) VALUES (?, ?)",
+        )
+        .bind(3, "Weiterverarbeitung"),
+      db
+        .prepare(
+          "INSERT OR IGNORE INTO customers (id, customer_number, name, email, phone, street, postal_code, city, country, markup_percent, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          1,
+          "K-10024",
+          "Studio Nord GmbH",
+          "hello@studionord.ch",
+          "+41 44 211 08 60",
+          "Nordstrasse 24",
+          "8006",
+          "Zürich",
+          "Schweiz",
+          12,
+          "active",
+        ),
+      db
+        .prepare(
+          "INSERT OR IGNORE INTO customers (id, customer_number, name, email, phone, street, postal_code, city, country, markup_percent, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          2,
+          "K-10031",
+          "Café Cobalt",
+          "hallo@cafecobalt.ch",
+          "+41 44 330 41 10",
+          "Cobaltweg 8",
+          "8005",
+          "Zürich",
+          "Schweiz",
+          18,
+          "active",
+        ),
+      db
+        .prepare(
+          "INSERT OR IGNORE INTO customers (id, customer_number, name, email, phone, street, postal_code, city, country, markup_percent, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          3,
+          "K-10037",
+          "Atelier Riedel",
+          "mail@atelier-riedel.ch",
+          "+41 61 690 18 08",
+          "Werkhofstrasse 17",
+          "4058",
+          "Basel",
+          "Schweiz",
+          10,
+          "active",
+        ),
+      db
+        .prepare(
+          "INSERT OR IGNORE INTO customer_employees (id, customer_id, name, email, phone, login, password_hash, mail_to_main) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          11,
+          1,
+          "Mara Vogt",
+          "mara.vogt@studionord.ch",
+          "+41 79 610 22 14",
+          "mara.vogt@studionord.ch",
+          "portal",
+          1,
+        ),
+      db
+        .prepare(
+          "INSERT OR IGNORE INTO customer_employees (id, customer_id, name, email, phone, login, password_hash, mail_to_main) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          12,
+          1,
+          "Jonas Lenz",
+          "jonas.lenz@studionord.ch",
+          "+41 79 820 09 11",
+          "jonas.lenz@studionord.ch",
+          "portal",
+          0,
+        ),
+      db
+        .prepare(
+          "INSERT OR IGNORE INTO customer_employees (id, customer_id, name, email, phone, login, password_hash, mail_to_main) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          21,
+          2,
+          "Lina Ziegler",
+          "lina@cafecobalt.ch",
+          "+41 78 920 05 16",
+          "lina@cafecobalt.ch",
+          "portal",
+          1,
+        ),
+      db
+        .prepare(
+          "INSERT OR IGNORE INTO customer_employees (id, customer_id, name, email, phone, login, password_hash, mail_to_main) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          22,
+          2,
+          "Noel Marti",
+          "noel@cafecobalt.ch",
+          "+41 76 880 14 70",
+          "noel@cafecobalt.ch",
+          "portal",
+          0,
+        ),
+      db
+        .prepare(
+          "INSERT OR IGNORE INTO customer_employees (id, customer_id, name, email, phone, login, password_hash, mail_to_main) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          31,
+          3,
+          "Nils Riedel",
+          "nils@atelier-riedel.ch",
+          "+41 79 777 28 19",
+          "nils@atelier-riedel.ch",
+          "portal",
+          1,
+        ),
+      db.prepare(
+        "UPDATE customers SET contact_salutation = 'Frau', contact_first_name = 'Mara', contact_last_name = 'Vogt' WHERE id = 1",
+      ),
+      db.prepare(
+        "UPDATE customers SET contact_salutation = 'Frau', contact_first_name = 'Lina', contact_last_name = 'Ziegler' WHERE id = 2",
+      ),
+      db.prepare(
+        "UPDATE customers SET contact_salutation = 'Herr', contact_first_name = 'Nils', contact_last_name = 'Riedel' WHERE id = 3",
+      ),
+      db.prepare(
+        "UPDATE customer_employees SET salutation = 'Frau', first_name = 'Mara', last_name = 'Vogt' WHERE id = 11",
+      ),
+      db.prepare(
+        "UPDATE customer_employees SET salutation = 'Herr', first_name = 'Jonas', last_name = 'Lenz' WHERE id = 12",
+      ),
+      db.prepare(
+        "UPDATE customer_employees SET salutation = 'Frau', first_name = 'Lina', last_name = 'Ziegler' WHERE id = 21",
+      ),
+      db.prepare(
+        "UPDATE customer_employees SET salutation = 'Divers', first_name = 'Noel', last_name = 'Marti' WHERE id = 22",
+      ),
+      db.prepare(
+        "UPDATE customer_employees SET salutation = 'Herr', first_name = 'Nils', last_name = 'Riedel' WHERE id = 31",
+      ),
+      db
+        .prepare(
+          "INSERT OR IGNORE INTO suppliers (id, supplier_number, name, contact_name, email, phone, lead_time_days, group_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          1,
+          "L-2011",
+          "Papierwerk Süd",
+          "Julia Keller",
+          "jkeller@papierwerk-sued.de",
+          "+49 761 441 63 10",
+          4,
+          1,
+        ),
+      db
+        .prepare(
+          "INSERT OR IGNORE INTO suppliers (id, supplier_number, name, contact_name, email, phone, lead_time_days, group_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          2,
+          "L-2034",
+          "Farbwerk AG",
+          "Andreas Haas",
+          "a.haas@farbwerk.ch",
+          "+41 71 811 24 81",
+          6,
+          2,
+        ),
+      db
+        .prepare(
+          "INSERT OR IGNORE INTO suppliers (id, supplier_number, name, contact_name, email, phone, lead_time_days, group_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          3,
+          "L-2052",
+          "Die Buchbinderei",
+          "Sarah Winter",
+          "s.winter@buchbinderei.ch",
+          "+41 44 770 15 00",
+          3,
+          3,
+        ),
+    ]);
+  }
+  await db
+    .prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)")
+    .bind("directory_seeded", "1")
+    .run();
+}
+
+async function tableExists(db: D1Database, name: string) {
+  return Boolean(
+    await db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+      )
+      .bind(name)
+      .first(),
+  );
+}
+
+async function ensureColumn(
+  db: D1Database,
+  table: string,
+  column: string,
+  definition: string,
+) {
+  if (
+    !/^[a-z_]+$/.test(table) ||
+    !/^[a-z_]+$/.test(column) ||
+    !/^[A-Z0-9_ '[\]().-]+$/.test(definition)
+  )
+    throw new Error("Invalid schema identifier");
+  const columns = await db
+    .prepare(`PRAGMA table_info(${table})`)
+    .all<{ name: string }>();
+  if (!columns.results.some((item) => item.name === column))
+    await db
+      .prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+      .run();
+}
+
+async function readDirectory(db: D1Database) {
+  const [customerRows, employeeRows, supplierRows, groupRows] =
+    await Promise.all([
+      db
+        .prepare(
+          "SELECT id, customer_number, name, contact_salutation, contact_first_name, contact_last_name, email, phone, street, postal_code, city, country, markup_percent, status FROM customers ORDER BY name",
+        )
+        .all<DirectoryCustomerRow>(),
+      db
+        .prepare(
+          "SELECT id, customer_id, name, salutation, first_name, last_name, email, phone, login, password_hash, mail_to_main FROM customer_employees WHERE active = 1 ORDER BY name",
+        )
+        .all<DirectoryEmployeeRow>(),
+      db
+        .prepare(
+          "SELECT s.id, s.supplier_number, s.name, s.contact_name, s.email, s.phone, s.lead_time_days, s.lead_time_text, g.name AS group_name FROM suppliers s LEFT JOIN supplier_groups g ON g.id = s.group_id ORDER BY s.name",
+        )
+        .all<DirectorySupplierRow>(),
+      db
+        .prepare("SELECT name FROM supplier_groups ORDER BY name")
+        .all<{ name: string }>(),
+    ]);
+  const employeesByCustomer = new Map<number, DirectoryEmployeeRow[]>();
+  for (const employee of employeeRows.results)
+    employeesByCustomer.set(employee.customer_id, [
+      ...(employeesByCustomer.get(employee.customer_id) ?? []),
+      employee,
+    ]);
+  return {
+    customers: customerRows.results.map((customer) => ({
+      id: customer.id,
+      number: customer.customer_number,
+      name: customer.name,
+      contactSalutation: customer.contact_salutation ?? "Divers",
+      contactFirstName: customer.contact_first_name ?? "",
+      contactLastName: customer.contact_last_name ?? "",
+      email: customer.email ?? "",
+      phone: customer.phone ?? "",
+      street: customer.street ?? "",
+      postalCode: customer.postal_code ?? "",
+      city: customer.city ?? "",
+      country: customer.country,
+      markup: customer.markup_percent,
+      status: customer.status === "active" ? "Aktiv" : "Entwurf",
+      turnover: 0,
+      employees: (employeesByCustomer.get(customer.id) ?? []).map(
+        (employee) => ({
+          id: employee.id,
+          name: employee.name,
+          salutation: employee.salutation ?? "Divers",
+          firstName: employee.first_name ?? employee.name.split(" ")[0] ?? "",
+          lastName:
+            employee.last_name ?? employee.name.split(" ").slice(1).join(" "),
+          email: employee.email,
+          phone: employee.phone ?? "",
+          login: employee.login,
+          password: employee.password_hash,
+          mailToMain: Boolean(employee.mail_to_main),
+        }),
+      ),
+    })),
+    suppliers: supplierRows.results.map((supplier) => ({
+      id: supplier.id,
+      number: supplier.supplier_number,
+      name: supplier.name,
+      group: supplier.group_name ?? "Ohne Gruppe",
+      contact: supplier.contact_name ?? "",
+      email: supplier.email ?? "",
+      phone: supplier.phone ?? "",
+      leadTime:
+        supplier.lead_time_text ||
+        (supplier.lead_time_days
+          ? `${supplier.lead_time_days} Arbeitstage`
+          : "auf Anfrage"),
+    })),
+    groups: groupRows.results.map((group) => group.name),
+  };
+}
+
+async function nextNumber(db: D1Database, table: "customers" | "suppliers") {
+  const column = table === "customers" ? "customer_number" : "supplier_number";
+  const prefix = table === "customers" ? "K-" : "L-";
+  const floor = table === "customers" ? 10038 : 2053;
+  const row = await db
+    .prepare(
+      `SELECT MAX(CAST(SUBSTR(${column}, 3) AS INTEGER)) AS value FROM ${table}`,
+    )
+    .first<{ value: number | null }>();
+  return `${prefix}${Math.max(floor - 1, row?.value ?? 0) + 1}`;
+}
+
+async function resolveGroupId(db: D1Database, name: string) {
+  if (!name || name === "Ohne Gruppe") return null;
+  await db
+    .prepare("INSERT OR IGNORE INTO supplier_groups (name) VALUES (?)")
+    .bind(name)
+    .run();
+  return (
+    (
+      await db
+        .prepare("SELECT id FROM supplier_groups WHERE name = ?")
+        .bind(name)
+        .first<{ id: number }>()
+    )?.id ?? null
+  );
+}
+
+async function ensureFullSchema(db: D1Database) {
+  await ensureDirectorySchema(db);
+  await db.batch([
+    db.prepare(
+      "CREATE TABLE IF NOT EXISTS articles (id INTEGER PRIMARY KEY AUTOINCREMENT, sku TEXT NOT NULL UNIQUE, name TEXT NOT NULL, customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL, supplier_id INTEGER REFERENCES suppliers(id) ON DELETE SET NULL, supplier_group_id INTEGER REFERENCES supplier_groups(id) ON DELETE SET NULL, stock INTEGER NOT NULL DEFAULT 0, reorder_point INTEGER NOT NULL DEFAULT 0, unit_price REAL NOT NULL DEFAULT 0, tier_quantities_json TEXT NOT NULL DEFAULT '[]', stock_history_json TEXT NOT NULL DEFAULT '[]', print_file_key TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    ),
+    db.prepare(
+      "CREATE TABLE IF NOT EXISTS customer_accounts (id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1)",
+    ),
+    db.prepare(
+      "CREATE TABLE IF NOT EXISTS gzd_templates (id INTEGER PRIMARY KEY AUTOINCREMENT, article_id INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE, file_name TEXT NOT NULL, object_key TEXT NOT NULL, uploaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    ),
+    db.prepare(
+      "CREATE TABLE IF NOT EXISTS stock_events (id INTEGER PRIMARY KEY AUTOINCREMENT, article_id INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE, occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, change INTEGER NOT NULL, stock_after INTEGER NOT NULL, reason TEXT NOT NULL)",
+    ),
+    db.prepare(
+      "CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'requested', customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL, customer_employee_id INTEGER REFERENCES customer_employees(id) ON DELETE SET NULL, article_id INTEGER REFERENCES articles(id) ON DELETE SET NULL, supplier_id INTEGER REFERENCES suppliers(id) ON DELETE SET NULL, supplier_group_id INTEGER REFERENCES supplier_groups(id) ON DELETE SET NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    ),
+    db.prepare(
+      "CREATE TABLE IF NOT EXISTS documents (id INTEGER PRIMARY KEY AUTOINCREMENT, document_number TEXT NOT NULL UNIQUE, type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'draft', customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL, customer_employee_id INTEGER REFERENCES customer_employees(id) ON DELETE SET NULL, supplier_id INTEGER REFERENCES suppliers(id) ON DELETE SET NULL, subtotal REAL NOT NULL DEFAULT 0, markup_percent REAL NOT NULL DEFAULT 0, markup_amount REAL NOT NULL DEFAULT 0, total REAL NOT NULL DEFAULT 0, issued_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE, supplier_token TEXT, delivery_date TEXT, supplier_lead_time TEXT, supplier_delivery_date TEXT, supplier_delivery_note TEXT, binding_delivery_confirmation_due TEXT, requested_quantities_json TEXT NOT NULL DEFAULT '[]', note TEXT, request_text TEXT, document_text TEXT, supplier_note TEXT, attach_document INTEGER NOT NULL DEFAULT 1, attach_gzd INTEGER NOT NULL DEFAULT 1, print_file_key TEXT, supplier_gzd_key TEXT, gzd_status TEXT, pdf_object_key TEXT, payload TEXT NOT NULL DEFAULT '{}')",
+    ),
+    db.prepare(
+      "CREATE TABLE IF NOT EXISTS document_lines (id INTEGER PRIMARY KEY AUTOINCREMENT, document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE, article_id INTEGER REFERENCES articles(id) ON DELETE SET NULL, title TEXT NOT NULL, quantity INTEGER NOT NULL, unit_price REAL NOT NULL, line_total REAL NOT NULL)",
+    ),
+    db.prepare(
+      "CREATE TABLE IF NOT EXISTS document_offer_options (id INTEGER PRIMARY KEY AUTOINCREMENT, document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE, quantity INTEGER NOT NULL, supplier_unit_price REAL NOT NULL, supplier_total REAL NOT NULL, UNIQUE(document_id, quantity))",
+    ),
+    db.prepare(
+      "CREATE TABLE IF NOT EXISTS document_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE, kind TEXT NOT NULL, file_name TEXT NOT NULL, object_key TEXT NOT NULL UNIQUE, uploaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    ),
+    db.prepare(
+      "CREATE TABLE IF NOT EXISTS backend_users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, role TEXT NOT NULL DEFAULT 'operator', password_hash TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    ),
+    db.prepare(
+      "CREATE TABLE IF NOT EXISTS workflow_settings (id INTEGER PRIMARY KEY AUTOINCREMENT, request_template TEXT NOT NULL, offer_template TEXT NOT NULL, order_template TEXT NOT NULL, confirmation_template TEXT NOT NULL, supplier_offer_subject TEXT NOT NULL, offer_email TEXT NOT NULL, order_email TEXT NOT NULL, attach_request_document INTEGER NOT NULL DEFAULT 1, attach_request_gzd INTEGER NOT NULL DEFAULT 1, attach_offer_document INTEGER NOT NULL DEFAULT 1, attach_offer_gzd INTEGER NOT NULL DEFAULT 1, attach_order_document INTEGER NOT NULL DEFAULT 1, attach_order_gzd INTEGER NOT NULL DEFAULT 1, attach_confirmation_document INTEGER NOT NULL DEFAULT 1, attach_confirmation_gzd INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    ),
+    db.prepare(
+      "CREATE TABLE IF NOT EXISTS integration_settings (id INTEGER PRIMARY KEY, navision_endpoint TEXT NOT NULL DEFAULT '', navision_tenant TEXT NOT NULL DEFAULT '', api_base_url TEXT NOT NULL DEFAULT '', api_client_id TEXT NOT NULL DEFAULT '', ftp_protocol TEXT NOT NULL DEFAULT 'SFTP', ftp_host TEXT NOT NULL DEFAULT '', ftp_port TEXT NOT NULL DEFAULT '22', ftp_username TEXT NOT NULL DEFAULT '', ftp_directory TEXT NOT NULL DEFAULT '/printcenter', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    ),
+    db.prepare(
+      "CREATE TABLE IF NOT EXISTS email_sender_profiles (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'custom', from_name TEXT NOT NULL, from_email TEXT NOT NULL, reply_to TEXT NOT NULL DEFAULT '', smtp_host TEXT NOT NULL, smtp_port INTEGER NOT NULL DEFAULT 587, security TEXT NOT NULL DEFAULT 'starttls', username TEXT NOT NULL, password_ciphertext TEXT, active INTEGER NOT NULL DEFAULT 1, is_default INTEGER NOT NULL DEFAULT 0, last_tested_at TEXT, last_test_status TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    ),
+    db.prepare(
+      "CREATE TABLE IF NOT EXISTS navision_sync_log (id INTEGER PRIMARY KEY AUTOINCREMENT, entity_type TEXT NOT NULL, entity_id INTEGER NOT NULL, direction TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', external_reference TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    ),
+    db.prepare(
+      "CREATE INDEX IF NOT EXISTS idx_articles_customer_id ON articles(customer_id)",
+    ),
+    db.prepare(
+      "CREATE INDEX IF NOT EXISTS idx_articles_supplier_id ON articles(supplier_id)",
+    ),
+    db.prepare(
+      "CREATE INDEX IF NOT EXISTS idx_gzd_templates_article_id_uploaded_at ON gzd_templates(article_id, uploaded_at)",
+    ),
+    db.prepare(
+      "CREATE INDEX IF NOT EXISTS idx_stock_events_article_id_occurred_at ON stock_events(article_id, occurred_at)",
+    ),
+    db.prepare(
+      "CREATE INDEX IF NOT EXISTS idx_projects_customer_id_status ON projects(customer_id, status)",
+    ),
+    db.prepare(
+      "CREATE INDEX IF NOT EXISTS idx_projects_article_id ON projects(article_id)",
+    ),
+    db.prepare(
+      "CREATE INDEX IF NOT EXISTS idx_documents_type_status ON documents(type, status)",
+    ),
+    db.prepare(
+      "CREATE INDEX IF NOT EXISTS idx_documents_customer_id_issued_at ON documents(customer_id, issued_at)",
+    ),
+    db.prepare(
+      "CREATE INDEX IF NOT EXISTS idx_documents_project_id ON documents(project_id)",
+    ),
+    db.prepare(
+      "CREATE INDEX IF NOT EXISTS idx_document_lines_document_id ON document_lines(document_id)",
+    ),
+    db.prepare(
+      "CREATE INDEX IF NOT EXISTS idx_document_offer_options_document_id ON document_offer_options(document_id)",
+    ),
+    db.prepare(
+      "CREATE INDEX IF NOT EXISTS idx_document_attachments_document_id_kind ON document_attachments(document_id, kind)",
+    ),
+    db.prepare(
+      "CREATE INDEX IF NOT EXISTS idx_email_sender_profiles_active_default ON email_sender_profiles(active, is_default)",
+    ),
+  ]);
+  const documentColumns: Array<[string, string]> = [
+    ["supplier_lead_time", "TEXT"],
+    ["supplier_delivery_date", "TEXT"],
+    ["supplier_delivery_note", "TEXT"],
+    ["binding_delivery_confirmation_due", "TEXT"],
+    ["requested_quantities_json", "TEXT NOT NULL DEFAULT '[]'"],
+    ["request_text", "TEXT"],
+    ["document_text", "TEXT"],
+    ["supplier_note", "TEXT"],
+    ["gzd_status", "TEXT"],
+    ["attach_document", "INTEGER NOT NULL DEFAULT 1"],
+    ["attach_gzd", "INTEGER NOT NULL DEFAULT 1"],
+  ];
+  for (const [column, definition] of documentColumns)
+    await ensureColumn(db, "documents", column, definition);
+  await db.prepare("PRAGMA optimize").run();
+}
+
+const parseJson = <T>(value: string | null | undefined, fallback: T): T => {
+  try {
+    return value ? (JSON.parse(value) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+};
+
+type EmailSecurity = "tls" | "starttls" | "none";
+type EmailSenderRow = {
+  id: number;
+  label: string;
+  provider: string;
+  from_name: string;
+  from_email: string;
+  reply_to: string;
+  smtp_host: string;
+  smtp_port: number;
+  security: EmailSecurity;
+  username: string;
+  password_ciphertext: string | null;
+  active: number;
+  is_default: number;
+  last_tested_at: string | null;
+  last_test_status: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+const bytesToBase64 = (bytes: Uint8Array) => {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+};
+const base64ToBytes = (value: string) => {
+  const binary = atob(value);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+};
+const utf8Base64 = (value: string) =>
+  bytesToBase64(new TextEncoder().encode(value));
+
+async function emailEncryptionSecret(env: Env, db: D1Database) {
+  if (env.EMAIL_ENCRYPTION_KEY?.trim()) return env.EMAIL_ENCRYPTION_KEY.trim();
+  const stored = await db
+    .prepare("SELECT value FROM app_meta WHERE key = 'email_encryption_key'")
+    .first<{ value: string }>();
+  if (stored?.value) return stored.value;
+  const generated = bytesToBase64(crypto.getRandomValues(new Uint8Array(32)));
+  await db
+    .prepare(
+      "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('email_encryption_key', ?)",
+    )
+    .bind(generated)
+    .run();
+  return generated;
+}
+
+async function emailEncryptionKey(env: Env, db: D1Database) {
+  const material = new TextEncoder().encode(
+    await emailEncryptionSecret(env, db),
+  );
+  const digest = await crypto.subtle.digest("SHA-256", material);
+  return crypto.subtle.importKey("raw", digest, "AES-GCM", false, [
+    "encrypt",
+    "decrypt",
+  ]);
+}
+
+async function encryptEmailPassword(
+  env: Env,
+  db: D1Database,
+  password: string,
+) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    await emailEncryptionKey(env, db),
+    new TextEncoder().encode(password),
+  );
+  return `v1.${bytesToBase64(iv)}.${bytesToBase64(new Uint8Array(encrypted))}`;
+}
+
+async function decryptEmailPassword(
+  env: Env,
+  db: D1Database,
+  ciphertext: string,
+) {
+  const [version, iv, encrypted] = ciphertext.split(".");
+  if (version !== "v1" || !iv || !encrypted)
+    throw new Error("Das gespeicherte SMTP-Passwort ist ungültig.");
+  const cleartext = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: base64ToBytes(iv) },
+    await emailEncryptionKey(env, db),
+    base64ToBytes(encrypted),
+  );
+  return new TextDecoder().decode(cleartext);
+}
+
+const publicEmailSender = (row: EmailSenderRow) => ({
+  id: Number(row.id),
+  label: row.label,
+  provider: row.provider,
+  fromName: row.from_name,
+  fromEmail: row.from_email,
+  replyTo: row.reply_to,
+  smtpHost: row.smtp_host,
+  smtpPort: Number(row.smtp_port),
+  security: row.security,
+  username: row.username,
+  passwordConfigured: Boolean(row.password_ciphertext),
+  active: Boolean(row.active),
+  isDefault: Boolean(row.is_default),
+  lastTestedAt: row.last_tested_at,
+  lastTestStatus: row.last_test_status,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+async function readEmailSenders(db: D1Database) {
+  await ensureFullSchema(db);
+  const rows = await db
+    .prepare(
+      "SELECT * FROM email_sender_profiles ORDER BY is_default DESC, active DESC, label COLLATE NOCASE",
+    )
+    .all<EmailSenderRow>();
+  return rows.results.map(publicEmailSender);
+}
+
+const validEmail = (value: string) =>
+  /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) && !/[\r\n]/.test(value);
+const validSmtpHost = (value: string) =>
+  /^(?=.{1,253}$)(?!-)(?:[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?\.)*[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/i.test(
+    value,
+  ) &&
+  value !== "localhost" &&
+  !value.endsWith(".local");
+
+function validateEmailSenderBody(body: Record<string, unknown>) {
+  const label = String(body.label || "").trim();
+  const fromName = String(body.fromName || "").trim();
+  const fromEmail = String(body.fromEmail || "").trim();
+  const replyTo = String(body.replyTo || "").trim();
+  const smtpHost = String(body.smtpHost || "").trim().toLowerCase();
+  const smtpPort = Number(body.smtpPort);
+  const username = String(body.username || "").trim();
+  const security = String(body.security || "starttls") as EmailSecurity;
+  if (!label || !fromName || !username)
+    throw new Error("Profilname, Absendername und Benutzername sind Pflichtfelder.");
+  if (!validEmail(fromEmail) || (replyTo && !validEmail(replyTo)))
+    throw new Error("Bitte gültige Absender- und Antwortadressen eingeben.");
+  if (!validSmtpHost(smtpHost))
+    throw new Error("Bitte einen gültigen öffentlichen SMTP-Host eingeben.");
+  if (!Number.isInteger(smtpPort) || smtpPort < 1 || smtpPort > 65535)
+    throw new Error("Der SMTP-Port ist ungültig.");
+  if (smtpPort === 25)
+    throw new Error("SMTP-Port 25 ist nicht verfügbar. Bitte 465, 587 oder 2525 verwenden.");
+  if (!(["tls", "starttls", "none"] as string[]).includes(security))
+    throw new Error("Die gewählte SMTP-Verschlüsselung ist ungültig.");
+  return {
+    label,
+    provider: String(body.provider || "custom"),
+    fromName,
+    fromEmail,
+    replyTo,
+    smtpHost,
+    smtpPort,
+    security,
+    username,
+    active: body.active !== false,
+    isDefault: Boolean(body.isDefault) && body.active !== false,
+  };
+}
+
+async function sendSmtpTest(
+  profile: EmailSenderRow,
+  password: string,
+  recipient: string,
+) {
+  if (!validEmail(recipient))
+    throw new Error("Bitte eine gültige Test-Empfängeradresse eingeben.");
+  const { connect } = await import("cloudflare:sockets");
+  let socket = connect(
+    { hostname: profile.smtp_host, port: Number(profile.smtp_port) },
+    {
+      secureTransport:
+        profile.security === "tls"
+          ? "on"
+          : profile.security === "starttls"
+            ? "starttls"
+            : "off",
+      allowHalfOpen: false,
+    },
+  );
+  await socket.opened;
+  let reader = socket.readable.getReader();
+  let writer = socket.writable.getWriter();
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  let pending = "";
+  const readResponse = async () => {
+    const lines: string[] = [];
+    while (true) {
+      const lineEnd = pending.indexOf("\r\n");
+      if (lineEnd >= 0) {
+        const line = pending.slice(0, lineEnd);
+        pending = pending.slice(lineEnd + 2);
+        lines.push(line);
+        if (/^\d{3} /.test(line)) return lines.join("\n");
+        continue;
+      }
+      const result = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("Zeitüberschreitung beim SMTP-Server.")), 15000),
+        ),
+      ]);
+      if (result.done) throw new Error("Der SMTP-Server hat die Verbindung beendet.");
+      pending += decoder.decode(result.value, { stream: true });
+    }
+  };
+  const expect = async (codes: number[]) => {
+    const response = await readResponse();
+    const code = Number(response.slice(0, 3));
+    if (!codes.includes(code))
+      throw new Error(`SMTP ${code || "Fehler"}: ${response.replace(/\n/g, " · ").slice(0, 240)}`);
+    return response;
+  };
+  const writeLine = (value: string) => writer.write(encoder.encode(`${value}\r\n`));
+  try {
+    await expect([220]);
+    await writeLine("EHLO printcenter.local");
+    await expect([250]);
+    if (profile.security === "starttls") {
+      await writeLine("STARTTLS");
+      await expect([220]);
+      reader.releaseLock();
+      writer.releaseLock();
+      socket = socket.startTls();
+      await socket.opened;
+      reader = socket.readable.getReader();
+      writer = socket.writable.getWriter();
+      pending = "";
+      await writeLine("EHLO printcenter.local");
+      await expect([250]);
+    }
+    await writeLine("AUTH LOGIN");
+    await expect([334]);
+    await writeLine(utf8Base64(profile.username));
+    await expect([334]);
+    await writeLine(utf8Base64(password));
+    await expect([235]);
+    await writeLine(`MAIL FROM:<${profile.from_email}>`);
+    await expect([250]);
+    await writeLine(`RCPT TO:<${recipient}>`);
+    await expect([250, 251]);
+    await writeLine("DATA");
+    await expect([354]);
+    const subject = "Printcenter – SMTP-Test erfolgreich";
+    const body = [
+      "Diese Testmail wurde über das Printcenter versendet.",
+      "",
+      `Absenderprofil: ${profile.label}`,
+      `SMTP-Server: ${profile.smtp_host}:${profile.smtp_port}`,
+      "",
+      "Die Verbindung und Anmeldung funktionieren.",
+    ].join("\r\n");
+    const message = [
+      `From: ${profile.from_name} <${profile.from_email}>`,
+      `To: ${recipient}`,
+      `Reply-To: ${profile.reply_to || profile.from_email}`,
+      `Subject: =?UTF-8?B?${utf8Base64(subject)}?=`,
+      `Date: ${new Date().toUTCString()}`,
+      `Message-ID: <${crypto.randomUUID()}@printcenter.local>`,
+      "MIME-Version: 1.0",
+      "Content-Type: text/plain; charset=UTF-8",
+      "Content-Transfer-Encoding: base64",
+      "",
+      utf8Base64(body),
+    ].join("\r\n");
+    await writer.write(encoder.encode(`${message.replace(/^\./gm, "..")}\r\n.\r\n`));
+    await expect([250]);
+    await writeLine("QUIT");
+    await expect([221]);
+  } finally {
+    reader.releaseLock();
+    writer.releaseLock();
+    await socket.close().catch(() => undefined);
+  }
+}
+
+async function readFullState(db: D1Database) {
+  await ensureFullSchema(db);
+  const directory = await readDirectory(db);
+  const initialized = Boolean(
+    await db
+      .prepare("SELECT value FROM app_meta WHERE key = ?")
+      .bind("full_state_seeded")
+      .first(),
+  );
+  const [
+    articleRows,
+    stockRows,
+    templateRows,
+    documentRows,
+    optionRows,
+    backendRows,
+    workflowRow,
+  ] = await Promise.all([
+    db
+      .prepare(
+        "SELECT a.id, a.sku, a.name, a.customer_id, a.supplier_id, a.supplier_group_id, a.stock, a.reorder_point, a.unit_price, a.tier_quantities_json, s.name AS supplier_name, g.name AS group_name FROM articles a LEFT JOIN suppliers s ON s.id = a.supplier_id LEFT JOIN supplier_groups g ON g.id = a.supplier_group_id ORDER BY a.name",
+      )
+      .all<Record<string, string | number | null>>(),
+    db
+      .prepare(
+        "SELECT id, article_id, occurred_at, change, stock_after, reason FROM stock_events ORDER BY occurred_at DESC, id DESC",
+      )
+      .all<Record<string, string | number>>(),
+    db
+      .prepare(
+        "SELECT id, article_id, file_name, object_key, uploaded_at FROM gzd_templates ORDER BY uploaded_at DESC, id DESC",
+      )
+      .all<Record<string, string | number>>(),
+    db
+      .prepare("SELECT * FROM documents ORDER BY issued_at DESC, id DESC")
+      .all<Record<string, string | number | null>>(),
+    db
+      .prepare(
+        "SELECT document_id, quantity, supplier_unit_price, supplier_total FROM document_offer_options ORDER BY quantity",
+      )
+      .all<Record<string, number>>(),
+    db
+      .prepare(
+        "SELECT id, name, email, role, password_hash, active FROM backend_users ORDER BY name",
+      )
+      .all<Record<string, string | number>>(),
+    db
+      .prepare("SELECT * FROM workflow_settings ORDER BY id LIMIT 1")
+      .first<Record<string, string | number>>(),
+  ]);
+  const stockByArticle = new Map<
+    number,
+    Array<{ date: string; change: number; stock: number; reason: string }>
+  >();
+  for (const row of stockRows.results) {
+    const articleId = Number(row.article_id);
+    stockByArticle.set(articleId, [
+      ...(stockByArticle.get(articleId) ?? []),
+      {
+        date: String(row.occurred_at),
+        change: Number(row.change),
+        stock: Number(row.stock_after),
+        reason: String(row.reason),
+      },
+    ]);
+  }
+  const templatesByArticle = new Map<
+    number,
+    Array<{ id: number; file: string; addedAt: string; url?: string }>
+  >();
+  for (const row of templateRows.results) {
+    const articleId = Number(row.article_id);
+    const objectKey = String(row.object_key);
+    templatesByArticle.set(articleId, [
+      ...(templatesByArticle.get(articleId) ?? []),
+      {
+        id: Number(row.id),
+        file: String(row.file_name),
+        addedAt: String(row.uploaded_at),
+        url: objectKey.startsWith("/api/files/") ? objectKey : undefined,
+      },
+    ]);
+  }
+  const optionsByDocument = new Map<
+    number,
+    Array<{ quantity: number; unitPrice: number; supplierTotal: number }>
+  >();
+  for (const row of optionRows.results) {
+    const documentId = Number(row.document_id);
+    optionsByDocument.set(documentId, [
+      ...(optionsByDocument.get(documentId) ?? []),
+      {
+        quantity: Number(row.quantity),
+        unitPrice: Number(row.supplier_unit_price),
+        supplierTotal: Number(row.supplier_total),
+      },
+    ]);
+  }
+  const articles = articleRows.results.map((row) => ({
+    id: Number(row.id),
+    sku: String(row.sku),
+    name: String(row.name),
+    customerId: row.customer_id == null ? undefined : Number(row.customer_id),
+    supplier: row.group_name
+      ? `group:${row.group_name}`
+      : row.supplier_name
+        ? String(row.supplier_name)
+        : "Nicht zugeordnet",
+    stock: Number(row.stock),
+    minimum: Number(row.reorder_point),
+    unitPrice: Number(row.unit_price),
+    tierQuantities: parseJson<number[]>(String(row.tier_quantities_json), []),
+    stockHistory: stockByArticle.get(Number(row.id)) ?? [],
+    templates: templatesByArticle.get(Number(row.id)) ?? [],
+  }));
+  const documents = documentRows.results.map((row) => {
+    const payload = parseJson<StateDocument>(
+      String(row.payload ?? "{}"),
+      {} as StateDocument,
+    );
+    return {
+      ...payload,
+      id: Number(row.id),
+      number: String(row.document_number),
+      type: String(row.type),
+      status: String(row.status),
+      customerId:
+        row.customer_id == null ? payload.customerId : Number(row.customer_id),
+      employeeId:
+        row.customer_employee_id == null
+          ? undefined
+          : Number(row.customer_employee_id),
+      supplierId: row.supplier_id == null ? undefined : Number(row.supplier_id),
+      projectId: row.project_id == null ? undefined : Number(row.project_id),
+      subtotal: Number(row.subtotal),
+      markupPercent: Number(row.markup_percent),
+      markupAmount: Number(row.markup_amount),
+      total: Number(row.total),
+      date: String(row.issued_at),
+      supplierToken:
+        row.supplier_token == null ? undefined : String(row.supplier_token),
+      deliveryDate:
+        row.delivery_date == null ? undefined : String(row.delivery_date),
+      supplierLeadTime:
+        row.supplier_lead_time == null
+          ? undefined
+          : String(row.supplier_lead_time),
+      supplierDeliveryDate:
+        row.supplier_delivery_date == null
+          ? undefined
+          : String(row.supplier_delivery_date),
+      supplierDeliveryNote:
+        row.supplier_delivery_note == null
+          ? undefined
+          : String(row.supplier_delivery_note),
+      bindingDeliveryConfirmationDue:
+        row.binding_delivery_confirmation_due == null
+          ? undefined
+          : String(row.binding_delivery_confirmation_due),
+      requestedQuantities: parseJson<number[]>(
+        String(row.requested_quantities_json ?? "[]"),
+        payload.requestedQuantities ?? [],
+      ),
+      note: row.note == null ? undefined : String(row.note),
+      requestText:
+        row.request_text == null ? undefined : String(row.request_text),
+      documentText:
+        row.document_text == null ? undefined : String(row.document_text),
+      supplierNote:
+        row.supplier_note == null ? undefined : String(row.supplier_note),
+      attachDocument: Boolean(row.attach_document),
+      attachGzd: Boolean(row.attach_gzd),
+      printFile:
+        row.print_file_key == null ? undefined : String(row.print_file_key),
+      supplierGzd:
+        row.supplier_gzd_key == null ? undefined : String(row.supplier_gzd_key),
+      gzdStatus: row.gzd_status == null ? undefined : String(row.gzd_status),
+      offerOptions:
+        optionsByDocument.get(Number(row.id)) ?? payload.offerOptions,
+    } as StateDocument;
+  });
+  const workflowSettings = workflowRow
+    ? {
+        requestTemplate: String(workflowRow.request_template),
+        offerTemplate: String(workflowRow.offer_template),
+        orderTemplate: String(workflowRow.order_template),
+        confirmationTemplate: String(workflowRow.confirmation_template),
+        supplierOfferSubject: String(workflowRow.supplier_offer_subject),
+        offerEmail: String(workflowRow.offer_email),
+        orderEmail: String(workflowRow.order_email),
+        attachRequestDocument: Boolean(workflowRow.attach_request_document),
+        attachRequestGzd: Boolean(workflowRow.attach_request_gzd),
+        attachOfferDocument: Boolean(workflowRow.attach_offer_document),
+        attachOfferGzd: Boolean(workflowRow.attach_offer_gzd),
+        attachOrderDocument: Boolean(workflowRow.attach_order_document),
+        attachOrderGzd: Boolean(workflowRow.attach_order_gzd),
+        attachConfirmationDocument: Boolean(
+          workflowRow.attach_confirmation_document,
+        ),
+        attachConfirmationGzd: Boolean(workflowRow.attach_confirmation_gzd),
+      }
+    : undefined;
+  return {
+    initialized,
+    ...directory,
+    articles,
+    documents,
+    backendUsers: backendRows.results.map((row) => ({
+      id: Number(row.id),
+      name: String(row.name),
+      email: String(row.email),
+      role: String(row.role),
+      password: String(row.password_hash),
+      active: Boolean(row.active),
+    })),
+    workflowSettings,
+  };
+}
+
+async function replaceFullState(db: D1Database, state: FullState) {
+  await ensureFullSchema(db);
+  const statements: D1PreparedStatement[] = [];
+  for (const table of [
+    "document_attachments",
+    "document_offer_options",
+    "document_lines",
+    "documents",
+    "projects",
+    "gzd_templates",
+    "stock_events",
+    "articles",
+    "customer_accounts",
+    "customer_employees",
+    "suppliers",
+    "supplier_groups",
+    "customers",
+    "backend_users",
+    "workflow_settings",
+  ])
+    statements.push(db.prepare(`DELETE FROM ${table}`));
+  const groupIds = new Map(
+    state.groups.map((name, index) => [name, index + 1]),
+  );
+  for (const [name, id] of groupIds)
+    statements.push(
+      db
+        .prepare("INSERT INTO supplier_groups (id, name) VALUES (?, ?)")
+        .bind(id, name),
+    );
+  for (const customer of state.customers) {
+    statements.push(
+      db
+        .prepare(
+          "INSERT INTO customers (id, customer_number, name, contact_salutation, contact_first_name, contact_last_name, email, phone, street, postal_code, city, country, markup_percent, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          customer.id,
+          customer.number,
+          customer.name,
+          customer.contactSalutation ?? "Divers",
+          customer.contactFirstName ?? "",
+          customer.contactLastName ?? "",
+          customer.email,
+          customer.phone,
+          customer.street,
+          customer.postalCode,
+          customer.city,
+          customer.country,
+          customer.markup,
+          customer.status === "Aktiv" ? "active" : "draft",
+        ),
+    );
+    for (const employee of customer.employees)
+      statements.push(
+        db
+          .prepare(
+            "INSERT INTO customer_employees (id, customer_id, name, salutation, first_name, last_name, email, phone, login, password_hash, mail_to_main, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+          )
+          .bind(
+            employee.id,
+            customer.id,
+            employee.name,
+            employee.salutation ?? "Divers",
+            employee.firstName ?? employee.name.split(" ")[0] ?? "",
+            employee.lastName ?? employee.name.split(" ").slice(1).join(" "),
+            employee.email,
+            employee.phone,
+            employee.email,
+            employee.password ?? "portal",
+            employee.mailToMain ? 1 : 0,
+          ),
+      );
+  }
+  for (const supplier of state.suppliers) {
+    const days = Number.parseInt(supplier.leadTime, 10) || null;
+    statements.push(
+      db
+        .prepare(
+          "INSERT INTO suppliers (id, supplier_number, name, contact_name, email, phone, lead_time_days, lead_time_text, group_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          supplier.id,
+          supplier.number,
+          supplier.name,
+          supplier.contact,
+          supplier.email,
+          supplier.phone,
+          days,
+          supplier.leadTime,
+          groupIds.get(supplier.group) ?? null,
+        ),
+    );
+  }
+  const suppliersByName = new Map(
+    state.suppliers.map((supplier) => [supplier.name, supplier.id]),
+  );
+  const validSupplierIds = new Set(
+    state.suppliers.map((supplier) => supplier.id),
+  );
+  const validArticleIds = new Set(state.articles.map((article) => article.id));
+  const validEmployeeIds = new Set(
+    state.customers.flatMap((customer) =>
+      customer.employees.map((employee) => employee.id),
+    ),
+  );
+  for (const article of state.articles) {
+    const groupName = article.supplier.startsWith("group:")
+      ? article.supplier.slice(6)
+      : undefined;
+    const supplierId = groupName
+      ? null
+      : (suppliersByName.get(article.supplier) ?? null);
+    statements.push(
+      db
+        .prepare(
+          "INSERT INTO articles (id, sku, name, customer_id, supplier_id, supplier_group_id, stock, reorder_point, unit_price, tier_quantities_json, stock_history_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          article.id,
+          article.sku,
+          article.name,
+          article.customerId &&
+            state.customers.some(
+              (customer) => customer.id === article.customerId,
+            )
+            ? article.customerId
+            : null,
+          supplierId,
+          groupName ? (groupIds.get(groupName) ?? null) : null,
+          article.stock,
+          article.minimum,
+          article.unitPrice,
+          JSON.stringify(article.tierQuantities),
+          JSON.stringify(article.stockHistory),
+        ),
+    );
+    article.stockHistory.forEach((event, index) =>
+      statements.push(
+        db
+          .prepare(
+            "INSERT INTO stock_events (id, article_id, occurred_at, change, stock_after, reason) VALUES (?, ?, ?, ?, ?, ?)",
+          )
+          .bind(
+            article.id * 1000 + index + 1,
+            article.id,
+            event.date,
+            event.change,
+            event.stock,
+            event.reason,
+          ),
+      ),
+    );
+    for (const template of article.templates)
+      statements.push(
+        db
+          .prepare(
+            "INSERT INTO gzd_templates (id, article_id, file_name, object_key, uploaded_at) VALUES (?, ?, ?, ?, ?)",
+          )
+          .bind(
+            template.id,
+            article.id,
+            template.file,
+            template.url ?? `gzd/${article.id}/${template.id}-${template.file}`,
+            template.addedAt,
+          ),
+      );
+  }
+  const projectDocuments = new Map<number, StateDocument[]>();
+  for (const document of state.documents) {
+    const projectId = document.projectId ?? document.id;
+    projectDocuments.set(projectId, [
+      ...(projectDocuments.get(projectId) ?? []),
+      document,
+    ]);
+  }
+  for (const [projectId, projectDocs] of projectDocuments) {
+    const first = projectDocs[0];
+    const status = projectDocs.some(
+      (item) => item.type === "Auftragsbestätigung",
+    )
+      ? "confirmed"
+      : projectDocs.some((item) => item.type === "Bestellung")
+        ? "ordered"
+        : projectDocs.some((item) => item.type === "Angebot")
+          ? "quoted"
+          : "requested";
+    const groupName = first.supplier?.startsWith("Lieferantengruppe · ")
+      ? first.supplier.slice("Lieferantengruppe · ".length)
+      : undefined;
+    const candidateSupplierId =
+      first.supplierId ??
+      (first.supplier ? suppliersByName.get(first.supplier) : undefined);
+    statements.push(
+      db
+        .prepare(
+          "INSERT INTO projects (id, title, status, customer_id, customer_employee_id, article_id, supplier_id, supplier_group_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          projectId,
+          first.article || first.number,
+          status,
+          state.customers.some((item) => item.id === first.customerId)
+            ? first.customerId
+            : null,
+          first.employeeId && validEmployeeIds.has(first.employeeId)
+            ? first.employeeId
+            : null,
+          first.articleId && validArticleIds.has(first.articleId)
+            ? first.articleId
+            : null,
+          candidateSupplierId && validSupplierIds.has(candidateSupplierId)
+            ? candidateSupplierId
+            : null,
+          groupName ? (groupIds.get(groupName) ?? null) : null,
+          first.date,
+          first.date,
+        ),
+    );
+  }
+  for (const document of state.documents) {
+    const payload = JSON.stringify(document, (key, value) =>
+      key === "pdfUrl" ? undefined : value,
+    );
+    const projectId = document.projectId ?? document.id;
+    const candidateSupplierId =
+      document.supplierId ??
+      (document.supplier ? suppliersByName.get(document.supplier) : undefined);
+    statements.push(
+      db
+        .prepare(
+          "INSERT INTO documents (id, document_number, type, status, customer_id, customer_employee_id, supplier_id, subtotal, markup_percent, markup_amount, total, issued_at, project_id, supplier_token, delivery_date, supplier_lead_time, supplier_delivery_date, supplier_delivery_note, binding_delivery_confirmation_due, requested_quantities_json, note, request_text, document_text, supplier_note, attach_document, attach_gzd, print_file_key, supplier_gzd_key, gzd_status, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          document.id,
+          document.number,
+          document.type,
+          document.status,
+          state.customers.some((item) => item.id === document.customerId)
+            ? document.customerId
+            : null,
+          document.employeeId && validEmployeeIds.has(document.employeeId)
+            ? document.employeeId
+            : null,
+          candidateSupplierId && validSupplierIds.has(candidateSupplierId)
+            ? candidateSupplierId
+            : null,
+          document.subtotal,
+          document.markupPercent,
+          document.markupAmount,
+          document.total,
+          document.date,
+          projectId,
+          document.supplierToken ?? null,
+          document.deliveryDate ?? null,
+          document.supplierLeadTime ?? null,
+          document.supplierDeliveryDate ?? null,
+          document.supplierDeliveryNote ?? null,
+          document.bindingDeliveryConfirmationDue ?? null,
+          JSON.stringify(document.requestedQuantities ?? []),
+          document.note ?? null,
+          document.requestText ?? null,
+          document.documentText ?? null,
+          document.supplierNote ?? null,
+          document.attachDocument === false ? 0 : 1,
+          document.attachGzd === false ? 0 : 1,
+          document.printFile ?? null,
+          document.supplierGzd ?? null,
+          document.gzdStatus ?? null,
+          payload,
+        ),
+    );
+    statements.push(
+      db
+        .prepare(
+          "INSERT INTO document_lines (document_id, article_id, title, quantity, unit_price, line_total) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          document.id,
+          document.articleId && validArticleIds.has(document.articleId)
+            ? document.articleId
+            : null,
+          document.article,
+          document.quantity,
+          document.unitPrice,
+          document.total,
+        ),
+    );
+    for (const option of document.offerOptions ?? [])
+      statements.push(
+        db
+          .prepare(
+            "INSERT INTO document_offer_options (document_id, quantity, supplier_unit_price, supplier_total) VALUES (?, ?, ?, ?)",
+          )
+          .bind(
+            document.id,
+            option.quantity,
+            option.unitPrice,
+            option.supplierTotal ?? option.quantity * option.unitPrice,
+          ),
+      );
+    if (document.printFile)
+      statements.push(
+        db
+          .prepare(
+            "INSERT INTO document_attachments (document_id, kind, file_name, object_key) VALUES (?, ?, ?, ?)",
+          )
+          .bind(
+            document.id,
+            "customer_gzd",
+            document.printFile,
+            `documents/${document.id}/customer-${document.printFile}`,
+          ),
+      );
+    if (document.supplierGzd)
+      statements.push(
+        db
+          .prepare(
+            "INSERT INTO document_attachments (document_id, kind, file_name, object_key) VALUES (?, ?, ?, ?)",
+          )
+          .bind(
+            document.id,
+            "supplier_gzd",
+            document.supplierGzd,
+            `documents/${document.id}/supplier-${document.supplierGzd}`,
+          ),
+      );
+  }
+  for (const user of state.backendUsers)
+    statements.push(
+      db
+        .prepare(
+          "INSERT INTO backend_users (id, name, email, role, password_hash, active) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          user.id,
+          user.name,
+          user.email,
+          user.role,
+          user.password,
+          user.active ? 1 : 0,
+        ),
+    );
+  const workflow = state.workflowSettings;
+  statements.push(
+    db
+      .prepare(
+        "INSERT INTO workflow_settings (id, request_template, offer_template, order_template, confirmation_template, supplier_offer_subject, offer_email, order_email, attach_request_document, attach_request_gzd, attach_offer_document, attach_offer_gzd, attach_order_document, attach_order_gzd, attach_confirmation_document, attach_confirmation_gzd, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+      )
+      .bind(
+        workflow.requestTemplate,
+        workflow.offerTemplate,
+        workflow.orderTemplate,
+        workflow.confirmationTemplate,
+        workflow.supplierOfferSubject,
+        workflow.offerEmail,
+        workflow.orderEmail,
+        workflow.attachRequestDocument ? 1 : 0,
+        workflow.attachRequestGzd ? 1 : 0,
+        workflow.attachOfferDocument ? 1 : 0,
+        workflow.attachOfferGzd ? 1 : 0,
+        workflow.attachOrderDocument ? 1 : 0,
+        workflow.attachOrderGzd ? 1 : 0,
+        workflow.attachConfirmationDocument ? 1 : 0,
+        workflow.attachConfirmationGzd ? 1 : 0,
+      ),
+  );
+  statements.push(
+    db.prepare(
+      "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('full_state_seeded', '1')",
+    ),
+  );
+  await db.batch(statements);
+  await db.prepare("PRAGMA optimize").run();
+}
+
+async function databaseHealth(db: D1Database) {
+  await ensureFullSchema(db);
+  const expectedTables = [
+    "customers",
+    "customer_employees",
+    "supplier_groups",
+    "suppliers",
+    "articles",
+    "gzd_templates",
+    "stock_events",
+    "projects",
+    "documents",
+    "document_lines",
+    "document_offer_options",
+    "document_attachments",
+    "backend_users",
+    "workflow_settings",
+    "integration_settings",
+    "email_sender_profiles",
+    "navision_sync_log",
+  ];
+  const tableRows = await db
+    .prepare("SELECT name FROM sqlite_schema WHERE type = 'table'")
+    .all<{ name: string }>();
+  const existing = new Set(tableRows.results.map((row) => row.name));
+  const counts: Record<string, number> = {};
+  for (const table of expectedTables)
+    counts[table] = Number(
+      (
+        await db
+          .prepare(`SELECT COUNT(*) AS count FROM ${table}`)
+          .first<{ count: number }>()
+      )?.count ?? 0,
+    );
+  const foreignKeyViolations = await db
+    .prepare("PRAGMA foreign_key_check")
+    .all<Record<string, string | number>>();
+  const brokenDocumentProjects = await db
+    .prepare(
+      "SELECT COUNT(*) AS count FROM documents d LEFT JOIN projects p ON p.id = d.project_id WHERE d.project_id IS NOT NULL AND p.id IS NULL",
+    )
+    .first<{ count: number }>();
+  const brokenDocumentLines = await db
+    .prepare(
+      "SELECT COUNT(*) AS count FROM document_lines l LEFT JOIN documents d ON d.id = l.document_id WHERE d.id IS NULL",
+    )
+    .first<{ count: number }>();
+  const brokenOfferOptions = await db
+    .prepare(
+      "SELECT COUNT(*) AS count FROM document_offer_options o LEFT JOIN documents d ON d.id = o.document_id WHERE d.id IS NULL",
+    )
+    .first<{ count: number }>();
+  return {
+    ok:
+      expectedTables.every((table) => existing.has(table)) &&
+      foreignKeyViolations.results.length === 0 &&
+      !brokenDocumentProjects?.count &&
+      !brokenDocumentLines?.count &&
+      !brokenOfferOptions?.count,
+    missingTables: expectedTables.filter((table) => !existing.has(table)),
+    foreignKeyViolations: foreignKeyViolations.results,
+    brokenLinks: {
+      documentProjects: Number(brokenDocumentProjects?.count ?? 0),
+      documentLines: Number(brokenDocumentLines?.count ?? 0),
+      offerOptions: Number(brokenOfferOptions?.count ?? 0),
+    },
+    counts,
+  };
+}
+
+async function readIntegrationSettings(db: D1Database) {
+  await ensureFullSchema(db);
+  const row = await db
+    .prepare("SELECT * FROM integration_settings WHERE id = 1")
+    .first<Record<string, string | number>>();
+  return {
+    navisionEndpoint: String(row?.navision_endpoint ?? ""),
+    navisionTenant: String(row?.navision_tenant ?? ""),
+    apiBaseUrl: String(row?.api_base_url ?? ""),
+    apiClientId: String(row?.api_client_id ?? ""),
+    ftpProtocol: String(row?.ftp_protocol ?? "SFTP"),
+    ftpHost: String(row?.ftp_host ?? ""),
+    ftpPort: String(row?.ftp_port ?? "22"),
+    ftpUsername: String(row?.ftp_username ?? ""),
+    ftpDirectory: String(row?.ftp_directory ?? "/printcenter"),
+  };
+}
+
+async function handleDirectoryApi(
+  request: Request,
+  env: Env,
+  db: D1Database,
+  url: URL,
+) {
+  await ensureDirectorySchema(db);
+  const customerMatch = url.pathname.match(/^\/api\/customers\/(\d+)$/);
+  const employeeMatch = url.pathname.match(
+    /^\/api\/customers\/(\d+)\/employees(?:\/(\d+))?$/,
+  );
+  const supplierMatch = url.pathname.match(/^\/api\/suppliers\/(\d+)$/);
+  const emailSenderMatch = url.pathname.match(
+    /^\/api\/email-senders\/(\d+)(?:\/(test))?$/,
+  );
+  if (url.pathname === "/api/database/health" && request.method === "GET")
+    return json(await databaseHealth(db));
+  if (url.pathname === "/api/integrations" && request.method === "GET")
+    return json(await readIntegrationSettings(db));
+  if (url.pathname === "/api/email-senders" && request.method === "GET")
+    return json({
+      senders: await readEmailSenders(db),
+      productionSecretConfigured: Boolean(env.EMAIL_ENCRYPTION_KEY?.trim()),
+    });
+  if (url.pathname === "/api/state" && request.method === "GET")
+    return json(await readFullState(db));
+  if (url.pathname === "/api/state" && request.method === "PUT") {
+    const state = await request.json<FullState>();
+    await replaceFullState(db, state);
+    return json({ ok: true });
+  }
+  if (request.method === "GET" && url.pathname === "/api/directory")
+    return json(await readDirectory(db));
+  const body =
+    request.method === "GET" || request.method === "DELETE"
+      ? {}
+      : await request.json<Record<string, unknown>>();
+
+  if (url.pathname.startsWith("/api/email-senders")) {
+    const origin = request.headers.get("Origin");
+    if (origin && origin !== url.origin)
+      return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
+    try {
+      if (url.pathname === "/api/email-senders" && request.method === "POST") {
+        const profile = validateEmailSenderBody(body);
+        const password = String(body.password || "");
+        if (!password)
+          return json(
+            { error: "Bitte ein SMTP-Passwort oder App-Passwort eingeben." },
+            { status: 400 },
+          );
+        const count = await db
+          .prepare("SELECT COUNT(*) AS count FROM email_sender_profiles")
+          .first<{ count: number }>();
+        const makeDefault =
+          profile.active &&
+          (profile.isDefault || Number(count?.count ?? 0) === 0);
+        if (makeDefault)
+          await db.prepare("UPDATE email_sender_profiles SET is_default = 0").run();
+        const result = await db
+          .prepare(
+            "INSERT INTO email_sender_profiles (label, provider, from_name, from_email, reply_to, smtp_host, smtp_port, security, username, password_ciphertext, active, is_default) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          )
+          .bind(
+            profile.label,
+            profile.provider,
+            profile.fromName,
+            profile.fromEmail,
+            profile.replyTo,
+            profile.smtpHost,
+            profile.smtpPort,
+            profile.security,
+            profile.username,
+            await encryptEmailPassword(env, db, password),
+            profile.active ? 1 : 0,
+            makeDefault ? 1 : 0,
+          )
+          .run();
+        const row = await db
+          .prepare("SELECT * FROM email_sender_profiles WHERE id = ?")
+          .bind(Number(result.meta.last_row_id))
+          .first<EmailSenderRow>();
+        return json(row ? publicEmailSender(row) : null, { status: 201 });
+      }
+      if (emailSenderMatch && !emailSenderMatch[2] && request.method === "PUT") {
+        const id = Number(emailSenderMatch[1]);
+        const existing = await db
+          .prepare("SELECT * FROM email_sender_profiles WHERE id = ?")
+          .bind(id)
+          .first<EmailSenderRow>();
+        if (!existing)
+          return json({ error: "Absenderprofil nicht gefunden." }, { status: 404 });
+        const profile = validateEmailSenderBody(body);
+        const password = String(body.password || "");
+        if (profile.isDefault)
+          await db.prepare("UPDATE email_sender_profiles SET is_default = 0").run();
+        await db
+          .prepare(
+            "UPDATE email_sender_profiles SET label = ?, provider = ?, from_name = ?, from_email = ?, reply_to = ?, smtp_host = ?, smtp_port = ?, security = ?, username = ?, password_ciphertext = ?, active = ?, is_default = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          )
+          .bind(
+            profile.label,
+            profile.provider,
+            profile.fromName,
+            profile.fromEmail,
+            profile.replyTo,
+            profile.smtpHost,
+            profile.smtpPort,
+            profile.security,
+            profile.username,
+            password
+              ? await encryptEmailPassword(env, db, password)
+              : existing.password_ciphertext,
+            profile.active ? 1 : 0,
+            profile.isDefault ? 1 : 0,
+            id,
+          )
+          .run();
+        const activeDefault = await db
+          .prepare(
+            "SELECT id FROM email_sender_profiles WHERE active = 1 AND is_default = 1 LIMIT 1",
+          )
+          .first<{ id: number }>();
+        if (!activeDefault)
+          await db
+            .prepare(
+              "UPDATE email_sender_profiles SET is_default = 1 WHERE id = (SELECT id FROM email_sender_profiles WHERE active = 1 ORDER BY id LIMIT 1)",
+            )
+            .run();
+        const row = await db
+          .prepare("SELECT * FROM email_sender_profiles WHERE id = ?")
+          .bind(id)
+          .first<EmailSenderRow>();
+        return json(row ? publicEmailSender(row) : null);
+      }
+      if (emailSenderMatch && !emailSenderMatch[2] && request.method === "DELETE") {
+        const id = Number(emailSenderMatch[1]);
+        await db.prepare("DELETE FROM email_sender_profiles WHERE id = ?").bind(id).run();
+        const activeDefault = await db
+          .prepare(
+            "SELECT id FROM email_sender_profiles WHERE active = 1 AND is_default = 1 LIMIT 1",
+          )
+          .first<{ id: number }>();
+        if (!activeDefault)
+          await db
+            .prepare(
+              "UPDATE email_sender_profiles SET is_default = 1 WHERE id = (SELECT id FROM email_sender_profiles WHERE active = 1 ORDER BY id LIMIT 1)",
+            )
+            .run();
+        return json({ ok: true });
+      }
+      if (emailSenderMatch?.[2] === "test" && request.method === "POST") {
+        const id = Number(emailSenderMatch[1]);
+        const profile = await db
+          .prepare("SELECT * FROM email_sender_profiles WHERE id = ?")
+          .bind(id)
+          .first<EmailSenderRow>();
+        if (!profile)
+          return json({ error: "Absenderprofil nicht gefunden." }, { status: 404 });
+        if (!profile.password_ciphertext)
+          return json(
+            { error: "Für dieses Profil ist kein SMTP-Passwort gespeichert." },
+            { status: 400 },
+          );
+        await sendSmtpTest(
+          profile,
+          await decryptEmailPassword(env, db, profile.password_ciphertext),
+          String(body.recipient || ""),
+        );
+        await db
+          .prepare(
+            "UPDATE email_sender_profiles SET last_tested_at = CURRENT_TIMESTAMP, last_test_status = 'success', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          )
+          .bind(id)
+          .run();
+        return json({ ok: true, message: "Die Testmail wurde erfolgreich versendet." });
+      }
+    } catch (error) {
+      if (emailSenderMatch?.[2] === "test")
+        await db
+          .prepare(
+            "UPDATE email_sender_profiles SET last_tested_at = CURRENT_TIMESTAMP, last_test_status = 'error', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          )
+          .bind(Number(emailSenderMatch[1]))
+          .run();
+      return json(
+        { error: error instanceof Error ? error.message : "E-Mail-Einstellungen konnten nicht verarbeitet werden." },
+        { status: 400 },
+      );
+    }
+  }
+
+  if (url.pathname === "/api/integrations" && request.method === "PUT") {
+    await ensureFullSchema(db);
+    const protocol =
+      String(body.ftpProtocol || "SFTP") === "FTP" ? "FTP" : "SFTP";
+    await db
+      .prepare(
+        "INSERT INTO integration_settings (id, navision_endpoint, navision_tenant, api_base_url, api_client_id, ftp_protocol, ftp_host, ftp_port, ftp_username, ftp_directory, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET navision_endpoint = excluded.navision_endpoint, navision_tenant = excluded.navision_tenant, api_base_url = excluded.api_base_url, api_client_id = excluded.api_client_id, ftp_protocol = excluded.ftp_protocol, ftp_host = excluded.ftp_host, ftp_port = excluded.ftp_port, ftp_username = excluded.ftp_username, ftp_directory = excluded.ftp_directory, updated_at = CURRENT_TIMESTAMP",
+      )
+      .bind(
+        body.navisionEndpoint || "",
+        body.navisionTenant || "",
+        body.apiBaseUrl || "",
+        body.apiClientId || "",
+        protocol,
+        body.ftpHost || "",
+        body.ftpPort || (protocol === "SFTP" ? "22" : "21"),
+        body.ftpUsername || "",
+        body.ftpDirectory || "/printcenter",
+      )
+      .run();
+    return json(await readIntegrationSettings(db));
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/customers") {
+    const number = await nextNumber(db, "customers");
+    const result = await db
+      .prepare(
+        "INSERT INTO customers (customer_number, name, contact_salutation, contact_first_name, contact_last_name, email, phone, street, postal_code, city, country, markup_percent, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        number,
+        body.name,
+        body.contactSalutation || "Divers",
+        body.contactFirstName || "",
+        body.contactLastName || "",
+        body.email,
+        body.phone,
+        body.street,
+        body.postalCode,
+        body.city,
+        body.country || "Schweiz",
+        Number(body.markup || 0),
+        "draft",
+      )
+      .run();
+    return json(
+      {
+        ...(await readDirectory(db)).customers.find(
+          (customer) => customer.id === Number(result.meta.last_row_id),
+        ),
+      },
+      { status: 201 },
+    );
+  }
+  if (customerMatch && request.method === "PUT") {
+    await db
+      .prepare(
+        "UPDATE customers SET name = ?, contact_salutation = ?, contact_first_name = ?, contact_last_name = ?, email = ?, phone = ?, street = ?, postal_code = ?, city = ?, country = ?, markup_percent = ? WHERE id = ?",
+      )
+      .bind(
+        body.name,
+        body.contactSalutation || "Divers",
+        body.contactFirstName || "",
+        body.contactLastName || "",
+        body.email,
+        body.phone,
+        body.street,
+        body.postalCode,
+        body.city,
+        body.country || "Schweiz",
+        Number(body.markup || 0),
+        Number(customerMatch[1]),
+      )
+      .run();
+    return json(
+      (await readDirectory(db)).customers.find(
+        (customer) => customer.id === Number(customerMatch[1]),
+      ),
+    );
+  }
+  if (customerMatch && request.method === "DELETE") {
+    const id = Number(customerMatch[1]);
+    const statements: D1PreparedStatement[] = [];
+    if (await tableExists(db, "documents"))
+      statements.push(
+        db
+          .prepare(
+            "UPDATE documents SET customer_employee_id = NULL, customer_id = NULL WHERE customer_id = ?",
+          )
+          .bind(id),
+      );
+    if (await tableExists(db, "articles"))
+      statements.push(
+        db
+          .prepare(
+            "UPDATE articles SET customer_id = NULL WHERE customer_id = ?",
+          )
+          .bind(id),
+      );
+    if (await tableExists(db, "customer_accounts"))
+      statements.push(
+        db
+          .prepare("DELETE FROM customer_accounts WHERE customer_id = ?")
+          .bind(id),
+      );
+    statements.push(
+      db
+        .prepare("DELETE FROM customer_employees WHERE customer_id = ?")
+        .bind(id),
+      db.prepare("DELETE FROM customers WHERE id = ?").bind(id),
+    );
+    await db.batch(statements);
+    return json({ ok: true });
+  }
+  if (employeeMatch && request.method === "POST") {
+    const customerId = Number(employeeMatch[1]);
+    const result = await db
+      .prepare(
+        "INSERT INTO customer_employees (customer_id, name, salutation, first_name, last_name, email, phone, login, password_hash, mail_to_main) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        customerId,
+        body.name,
+        body.salutation || "Divers",
+        body.firstName || "",
+        body.lastName || "",
+        body.email,
+        body.phone,
+        body.email,
+        body.password || "portal",
+        body.mailToMain ? 1 : 0,
+      )
+      .run();
+    const directory = await readDirectory(db);
+    return json(
+      directory.customers
+        .find((customer) => customer.id === customerId)
+        ?.employees.find(
+          (employee) => employee.id === Number(result.meta.last_row_id),
+        ),
+      { status: 201 },
+    );
+  }
+  if (employeeMatch?.[2] && request.method === "PUT") {
+    const employeeId = Number(employeeMatch[2]);
+    if (body.password)
+      await db
+        .prepare(
+          "UPDATE customer_employees SET name = ?, salutation = ?, first_name = ?, last_name = ?, email = ?, phone = ?, login = ?, password_hash = ?, mail_to_main = ? WHERE id = ?",
+        )
+        .bind(
+          body.name,
+          body.salutation || "Divers",
+          body.firstName || "",
+          body.lastName || "",
+          body.email,
+          body.phone,
+          body.email,
+          body.password,
+          body.mailToMain ? 1 : 0,
+          employeeId,
+        )
+        .run();
+    else
+      await db
+        .prepare(
+          "UPDATE customer_employees SET name = ?, salutation = ?, first_name = ?, last_name = ?, email = ?, phone = ?, login = ?, mail_to_main = ? WHERE id = ?",
+        )
+        .bind(
+          body.name,
+          body.salutation || "Divers",
+          body.firstName || "",
+          body.lastName || "",
+          body.email,
+          body.phone,
+          body.email,
+          body.mailToMain ? 1 : 0,
+          employeeId,
+        )
+        .run();
+    const directory = await readDirectory(db);
+    return json(
+      directory.customers
+        .find((customer) => customer.id === Number(employeeMatch[1]))
+        ?.employees.find((employee) => employee.id === employeeId),
+    );
+  }
+  if (employeeMatch?.[2] && request.method === "DELETE") {
+    const employeeId = Number(employeeMatch[2]);
+    if (await tableExists(db, "documents"))
+      await db
+        .prepare(
+          "UPDATE documents SET customer_employee_id = NULL WHERE customer_employee_id = ?",
+        )
+        .bind(employeeId)
+        .run();
+    await db
+      .prepare(
+        "DELETE FROM customer_employees WHERE id = ? AND customer_id = ?",
+      )
+      .bind(employeeId, Number(employeeMatch[1]))
+      .run();
+    return json({ ok: true });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/suppliers") {
+    const number = await nextNumber(db, "suppliers");
+    const groupId = await resolveGroupId(db, String(body.group || ""));
+    const leadTimeDays =
+      Number.parseInt(String(body.leadTime || ""), 10) || null;
+    const result = await db
+      .prepare(
+        "INSERT INTO suppliers (supplier_number, name, contact_name, email, phone, lead_time_days, lead_time_text, group_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        number,
+        body.name,
+        body.contact,
+        body.email,
+        body.phone,
+        leadTimeDays,
+        body.leadTime,
+        groupId,
+      )
+      .run();
+    return json(
+      (await readDirectory(db)).suppliers.find(
+        (supplier) => supplier.id === Number(result.meta.last_row_id),
+      ),
+      { status: 201 },
+    );
+  }
+  if (supplierMatch && request.method === "PUT") {
+    const groupId = await resolveGroupId(db, String(body.group || ""));
+    const leadTimeDays =
+      Number.parseInt(String(body.leadTime || ""), 10) || null;
+    await db
+      .prepare(
+        "UPDATE suppliers SET name = ?, contact_name = ?, email = ?, phone = ?, lead_time_days = ?, lead_time_text = ?, group_id = ? WHERE id = ?",
+      )
+      .bind(
+        body.name,
+        body.contact,
+        body.email,
+        body.phone,
+        leadTimeDays,
+        body.leadTime,
+        groupId,
+        Number(supplierMatch[1]),
+      )
+      .run();
+    return json(
+      (await readDirectory(db)).suppliers.find(
+        (supplier) => supplier.id === Number(supplierMatch[1]),
+      ),
+    );
+  }
+  if (supplierMatch && request.method === "DELETE") {
+    const id = Number(supplierMatch[1]);
+    const statements: D1PreparedStatement[] = [];
+    if (await tableExists(db, "documents"))
+      statements.push(
+        db
+          .prepare(
+            "UPDATE documents SET supplier_id = NULL WHERE supplier_id = ?",
+          )
+          .bind(id),
+      );
+    if (await tableExists(db, "articles"))
+      statements.push(
+        db
+          .prepare(
+            "UPDATE articles SET supplier_id = NULL WHERE supplier_id = ?",
+          )
+          .bind(id),
+      );
+    statements.push(db.prepare("DELETE FROM suppliers WHERE id = ?").bind(id));
+    await db.batch(statements);
+    return json({ ok: true });
+  }
+  if (request.method === "POST" && url.pathname === "/api/supplier-groups") {
+    await db
+      .prepare("INSERT OR IGNORE INTO supplier_groups (name) VALUES (?)")
+      .bind(body.name)
+      .run();
+    return json({ name: body.name }, { status: 201 });
+  }
+  if (
+    request.method === "DELETE" &&
+    url.pathname.startsWith("/api/supplier-groups/")
+  ) {
+    const name = decodeURIComponent(
+      url.pathname.slice("/api/supplier-groups/".length),
+    );
+    const group = await db
+      .prepare("SELECT id FROM supplier_groups WHERE name = ?")
+      .bind(name)
+      .first<{ id: number }>();
+    if (group) {
+      const statements: D1PreparedStatement[] = [
+        db
+          .prepare("UPDATE suppliers SET group_id = NULL WHERE group_id = ?")
+          .bind(group.id),
+      ];
+      if (await tableExists(db, "articles"))
+        statements.push(
+          db
+            .prepare(
+              "UPDATE articles SET supplier_group_id = NULL WHERE supplier_group_id = ?",
+            )
+            .bind(group.id),
+        );
+      statements.push(
+        db.prepare("DELETE FROM supplier_groups WHERE id = ?").bind(group.id),
+      );
+      await db.batch(statements);
+    }
+    return json({ ok: true });
+  }
+  return json({ error: "Nicht gefunden" }, { status: 404 });
+}
+
+// Image security config. SVG sources with .svg extension auto-skip the
+// optimization endpoint on the client side (served directly, no proxy).
+// To route SVGs through the optimizer (with security headers), set
+// dangerouslyAllowSVG: true in next.config.js and uncomment below:
+// const imageConfig: ImageConfig = { dangerouslyAllowSVG: true };
+
+const worker = {
+  async fetch(
+    request: Request,
+    env: Env | undefined,
+    ctx: ExecutionContext,
+  ): Promise<Response> {
+    const bindings = env;
+    const url = new URL(request.url);
+
+    if (url.pathname === "/_vinext/image") {
+      if (!bindings?.IMAGES)
+        return new Response("Image service unavailable", { status: 503 });
+      const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
+      return handleImageOptimization(
+        request,
+        {
+          fetchAsset: (path) =>
+            env.ASSETS.fetch(new Request(new URL(path, request.url))),
+          transformImage: async (body, { width, format, quality }) => {
+            const result = await bindings.IMAGES.input(body)
+              .transform(width > 0 ? { width } : {})
+              .output({ format, quality });
+            return result.response();
+          },
+        },
+        allowedWidths,
+      );
+    }
+
+    if (url.pathname === "/api/files" && request.method === "POST") {
+      if (!bindings?.FILES)
+        return json(
+          { error: "Der Dateispeicher ist nicht verbunden." },
+          { status: 503 },
+        );
+      const form = await request.formData();
+      const file = form.get("file");
+      if (!(file instanceof File) || file.size === 0)
+        return json(
+          { error: "Bitte eine gültige Datei auswählen." },
+          { status: 400 },
+        );
+      const safeName =
+        file.name.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") ||
+        "datei";
+      const key = `uploads/${crypto.randomUUID()}-${safeName}`;
+      await bindings.FILES.put(key, file.stream(), {
+        httpMetadata: {
+          contentType: file.type || "application/octet-stream",
+          contentDisposition: `inline; filename="${safeName}"`,
+        },
+        customMetadata: { originalName: file.name },
+      });
+      return json({
+        name: file.name,
+        key,
+        url: `/api/files/${encodeURIComponent(key)}`,
+      });
+    }
+
+    if (url.pathname.startsWith("/api/files/") && request.method === "GET") {
+      if (!bindings?.FILES)
+        return new Response("Dateispeicher nicht verbunden", { status: 503 });
+      const key = decodeURIComponent(url.pathname.slice("/api/files/".length));
+      const object = await bindings.FILES.get(key);
+      if (!object) return new Response("Datei nicht gefunden", { status: 404 });
+      const headers = new Headers({
+        "Cache-Control": "private, max-age=300",
+        ETag: object.httpEtag,
+      });
+      object.writeHttpMetadata(headers);
+      return new Response(object.body, { headers });
+    }
+
+    if (url.pathname.startsWith("/api/")) {
+      if (!bindings?.DB)
+        return json(
+          {
+            error:
+              "Die Datenbank ist in dieser lokalen Produktionsvorschau nicht verbunden.",
+          },
+          { status: 503 },
+        );
+      try {
+        return await handleDirectoryApi(request, bindings, bindings.DB, url);
+      } catch (error) {
+        console.error(error);
+        return json(
+          { error: "Die Änderung konnte nicht gespeichert werden." },
+          { status: 500 },
+        );
+      }
+    }
+
+    return handler.fetch(request, bindings as Env, ctx);
+  },
+};
+
+export default worker;
