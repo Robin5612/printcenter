@@ -8,6 +8,223 @@
   --line: #d8d2cb;
   --muted: #706e6a;
 }
+
+/* Erweiterte Beleg- und Lageransichten */
+.article-stock-history-link {
+  display: inline-flex;
+  justify-content: center;
+  margin: 0 0 14px;
+  text-decoration: none;
+}
+.stock-sku-link {
+  color: var(--red);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+.stock-sku-link:hover { color: var(--ink); }
+.collective-document-editor {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 3px solid var(--ink);
+}
+.collective-document-editor fieldset {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(0, 2fr);
+  gap: 14px;
+  margin: 0;
+  padding: 18px;
+  border: 1px solid var(--line);
+  background: #faf9f7;
+}
+.collective-document-editor legend {
+  padding: 0 8px;
+  color: var(--red);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.collective-document-editor label,
+.collective-edit-quantities label,
+.collective-edit-prices label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.collective-document-editor input,
+.collective-document-editor select {
+  width: 100%;
+  height: 42px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid #bfb9b2;
+  background: white;
+  color: var(--ink);
+}
+.collective-edit-quantities {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+.collective-edit-prices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.workflow-capability-note {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border-left: 4px solid var(--red);
+  background: white;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.stock-history-page {
+  min-height: 100vh;
+  padding: 44px clamp(22px, 5vw, 80px) 80px;
+  background: #f2eee8;
+  color: var(--ink);
+}
+.stock-history-state {
+  display: grid;
+  place-content: center;
+  text-align: center;
+}
+.stock-history-state button,
+.stock-history-header button {
+  padding: 12px 16px;
+  border: 2px solid var(--ink);
+  background: white;
+  color: var(--ink);
+  font-weight: 900;
+}
+.stock-history-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding-bottom: 28px;
+  border-bottom: 4px solid var(--ink);
+}
+.stock-history-header h1 {
+  margin: 4px 0;
+  color: var(--red);
+  font: 900 clamp(42px, 7vw, 94px) "Courier New", monospace;
+  letter-spacing: -5px;
+}
+.stock-history-header > div > strong {
+  display: block;
+  max-width: 900px;
+  font-size: clamp(20px, 3vw, 36px);
+}
+.stock-history-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 24px 0;
+  border: 2px solid var(--ink);
+  background: white;
+}
+.stock-history-metrics article {
+  display: grid;
+  gap: 12px;
+  padding: 24px;
+  border-right: 2px solid var(--ink);
+}
+.stock-history-metrics article:last-child { border-right: 0; }
+.stock-history-metrics span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+}
+.stock-history-metrics strong { font-size: clamp(24px, 4vw, 42px); }
+.stock-history-metrics .is-negative,
+.stock-history-event-list .is-negative { color: var(--red); }
+.stock-history-chart-panel,
+.stock-history-events-panel {
+  margin-top: 24px;
+  padding: 26px;
+  border: 2px solid var(--ink);
+  background: white;
+}
+.stock-period-switch { display: flex; border: 2px solid var(--ink); }
+.stock-period-switch button {
+  padding: 10px 14px;
+  border: 0;
+  border-right: 1px solid var(--ink);
+  background: white;
+  font-weight: 900;
+}
+.stock-period-switch button:last-child { border-right: 0; }
+.stock-period-switch button.is-active { background: var(--red); color: white; }
+.stock-history-chart {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  min-height: 250px;
+  padding: 26px 8px 0;
+  overflow-x: auto;
+  border-bottom: 3px solid var(--ink);
+}
+.stock-chart-column {
+  display: grid;
+  grid-template-rows: 22px 180px 28px;
+  min-width: 68px;
+  align-items: end;
+  justify-items: center;
+}
+.stock-chart-column strong {
+  align-self: start;
+  font: 900 11px "Courier New", monospace;
+}
+.stock-chart-column i {
+  display: block;
+  width: 36px;
+  max-height: 180px;
+  background: var(--red);
+}
+.stock-chart-column i.is-negative { background: var(--ink); }
+.stock-chart-column span {
+  align-self: end;
+  color: var(--muted);
+  font: 700 9px "Courier New", monospace;
+}
+.stock-history-event-list { display: grid; }
+.stock-history-event-list article {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.8fr) minmax(120px, 0.5fr) 90px minmax(240px, 1.5fr);
+  gap: 18px;
+  align-items: center;
+  padding: 15px 4px;
+  border-top: 1px solid var(--line);
+}
+.stock-history-event-list time,
+.stock-history-event-list span { color: var(--muted); font-size: 11px; }
+.stock-history-event-list b { font: 900 13px "Courier New", monospace; }
+@media (max-width: 760px) {
+  .collective-document-editor fieldset,
+  .collective-edit-quantities,
+  .collective-edit-prices,
+  .stock-history-metrics,
+  .stock-history-event-list article { grid-template-columns: 1fr; }
+  .stock-history-header { align-items: stretch; flex-direction: column; }
+  .stock-history-metrics article,
+  .stock-history-metrics article:last-child {
+    border-right: 0;
+    border-bottom: 2px solid var(--ink);
+  }
+  .stock-history-metrics article:last-child { border-bottom: 0; }
+}
 * {
   box-sizing: border-box;
 }
@@ -2673,6 +2890,7 @@ button {
 }
 .workflow-form textarea,
 .workflow-form input,
+.workflow-form select,
 .supplier-offer-form input,
 .supplier-offer-form textarea {
   width: 100%;
@@ -3401,6 +3619,22 @@ button {
 .profile-settings-form .primary-button {
   grid-column: 1 / -1;
 }
+.customer-profile-settings-card {
+  width: min(760px, 100%);
+}
+.customer-profile-settings-form {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.profile-settings-wide-field {
+  grid-column: 1 / -1;
+}
+.customer-profile-settings-form select,
+.customer-profile-settings-form input {
+  width: 100%;
+}
+.portal-profile-button {
+  white-space: nowrap;
+}
 .profile-password-reset {
   display: flex;
   justify-content: space-between;
@@ -3430,6 +3664,18 @@ button {
 .login-link-button {
   display: inline-flex;
   text-decoration: none;
+}
+@media (max-width: 620px) {
+  .customer-profile-settings-form {
+    grid-template-columns: 1fr;
+  }
+  .profile-settings-wide-field {
+    grid-column: auto;
+  }
+  .profile-password-reset {
+    align-items: stretch;
+    flex-direction: column;
+  }
 }
 .login-art {
   position: relative;
@@ -4506,6 +4752,57 @@ button {
   display: block;
   margin-top: 13px;
 }
+.system-purge-panel {
+  grid-column: 1 / -1;
+  border: 3px solid #a1002f;
+  background: #fff0f4;
+  box-shadow: 7px 7px 0 #a1002f;
+}
+.system-purge-panel h2 {
+  margin-bottom: 10px;
+}
+.system-purge-panel > p:not(.eyebrow) {
+  max-width: 900px;
+  color: #5e343f;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.system-purge-panel label {
+  display: grid;
+  gap: 7px;
+  max-width: 560px;
+  margin-top: 20px;
+  color: #6d1830;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+}
+.system-purge-panel input {
+  height: 44px;
+  padding: 10px 12px;
+  border: 2px solid #a1002f;
+  background: white;
+  color: var(--ink);
+  font-weight: 800;
+}
+.system-purge-button {
+  margin-top: 14px;
+  padding: 13px 17px;
+  border: 2px solid #a1002f;
+  background: #a1002f;
+  color: white;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.system-purge-button:disabled {
+  border-color: #c9c2bb;
+  background: #ded9d2;
+  color: #7a746e;
+  cursor: not-allowed;
+}
 .settings-message {
   grid-column: 1 / -1;
   margin: 0;
@@ -4580,7 +4877,7 @@ button {
   gap: 12px;
 }
 .integration-fields--ftp {
-  grid-template-columns: 0.6fr 1.2fr 0.45fr 1fr 1fr;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 .integration-fields label {
   display: grid;
@@ -4602,6 +4899,88 @@ button {
   color: var(--ink);
   font-size: 12px;
   text-transform: none;
+}
+.sftp-mapping-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-top: 18px;
+  padding: 15px 17px;
+  border: 2px solid var(--ink);
+  background: white;
+}
+.sftp-mapping-summary > div {
+  display: grid;
+  gap: 4px;
+}
+.sftp-mapping-summary strong {
+  font-size: 13px;
+}
+.sftp-mapping-summary span {
+  color: var(--muted);
+  font-size: 10px;
+}
+.sftp-mapping-summary .secondary-button {
+  margin: 0;
+  white-space: nowrap;
+}
+.sftp-mapping-card {
+  width: min(920px, 100%);
+}
+.sftp-mapping-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.sftp-mapping-options > label:not(.check-row) {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+}
+.sftp-mapping-options select,
+.sftp-mapping-row input,
+.sftp-mapping-row select {
+  width: 100%;
+  height: 42px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid #bfb9b2;
+  background: white;
+  color: var(--ink);
+}
+.sftp-mapping-options .check-row {
+  grid-column: 1 / -1;
+}
+.sftp-mapping-list {
+  display: grid;
+  gap: 8px;
+  max-height: 360px;
+  margin-top: 22px;
+  overflow-y: auto;
+}
+.sftp-mapping-head,
+.sftp-mapping-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(220px, 1.2fr) 34px;
+  gap: 10px;
+  align-items: center;
+}
+.sftp-mapping-head {
+  padding: 0 2px 7px;
+  border-bottom: 2px solid var(--ink);
+  color: var(--muted);
+  font-size: 9px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+}
+.sftp-mapping-card .form-actions-wide {
+  justify-content: space-between;
+  margin-top: 22px;
 }
 .integration-save {
   display: flex;
@@ -4852,6 +5231,7 @@ button {
   .backup-panel,
   .template-panel,
   .csv-import-panel,
+  .system-purge-panel,
   .integration-card,
   .integration-card--wide,
   .integration-save {
@@ -4875,6 +5255,19 @@ button {
   .integration-fields,
   .integration-fields--ftp {
     grid-template-columns: 1fr;
+  }
+  .sftp-mapping-summary,
+  .sftp-mapping-card .form-actions-wide {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .sftp-mapping-options,
+  .sftp-mapping-head,
+  .sftp-mapping-row {
+    grid-template-columns: 1fr;
+  }
+  .sftp-mapping-head {
+    display: none;
   }
   .email-settings-intro,
   .email-form-grid,

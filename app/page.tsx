@@ -11,7 +11,12 @@ import {
 import Link from "next/link";
 import { createDocumentPdfDataUri, downloadDocumentPdf } from "./document-pdf";
 import { completeSupplierTier } from "./price-calculation";
-import { attachGzdToArticle, isOrderForSupplier } from "./printcenter-relations";
+import {
+  applyStockSnapshot,
+  attachGzdToArticle,
+  isOrderForSupplier,
+  reachesReorderPoint,
+} from "./printcenter-relations";
 
 type DocumentType =
   | "Anfrage"
@@ -29,6 +34,7 @@ type EntryRoute =
   | "customer-home"
   | "backend"
   | "backend-reset"
+  | "customer-reset"
   | "customer"
   | "supplier";
 type Salutation = "Frau" | "Herr" | "Divers";
@@ -160,13 +166,40 @@ type DocumentRecord = {
   pdfUrl?: string;
   status: "Offen" | "Versendet" | "Bestätigt";
 };
+type DocumentEditData = {
+  id: number;
+  customerId: number;
+  employeeId?: number;
+  articleId?: number;
+  quantity: number;
+  unitPrice: number;
+  deliveryDate?: string;
+  note?: string;
+  status: DocumentRecord["status"];
+  items?: Array<{
+    articleId: number;
+    quantities: number[];
+    quantity: number;
+    unitPrice: number;
+  }>;
+};
+type WorkflowRecipient = "customer" | "supplier" | "system";
 type WorkflowSettings = {
   requestTemplate: string;
   offerTemplate: string;
   orderTemplate: string;
   confirmationTemplate: string;
+  reorderPointSubject: string;
+  reorderPointTemplate: string;
+  requestRecipient: WorkflowRecipient;
+  offerRecipient: WorkflowRecipient;
+  orderRecipient: WorkflowRecipient;
+  confirmationRecipient: WorkflowRecipient;
+  reorderPointRecipient: WorkflowRecipient;
   employeeLoginSubject: string;
   employeeLoginTemplate: string;
+  customerPasswordResetSubject: string;
+  customerPasswordResetTemplate: string;
   backendPasswordResetSubject: string;
   backendPasswordResetTemplate: string;
   supplierOfferSubject: string;
@@ -209,6 +242,12 @@ type IntegrationSettings = {
   ftpPort: string;
   ftpUsername: string;
   ftpDirectory: string;
+  sftpPullIntervalMinutes: number;
+  sftpCsvEntity: "customers" | "suppliers" | "articles";
+  sftpCsvDelimiter: ";" | "," | "tab";
+  sftpCsvHasHeader: boolean;
+  sftpCsvFilePattern: string;
+  sftpCsvMappings: Array<{ csvColumn: string; targetField: string }>;
 };
 type EmailSecurity = "tls" | "starttls" | "none";
 type EmailSender = {
@@ -396,6 +435,15 @@ const documentCreatedAt = (document: DocumentRecord) => {
   }
   const timestamp = Date.parse(document.date);
   return Number.isFinite(timestamp) ? timestamp : 0;
+};
+const formatDocumentCreatedAt = (document: DocumentRecord) => {
+  const timestamp = documentCreatedAt(document);
+  if (!timestamp) return document.date;
+  return new Intl.DateTimeFormat("de-CH", {
+    dateStyle: "short",
+    timeStyle: document.createdAt ? "short" : undefined,
+    timeZone: "Europe/Zurich",
+  }).format(new Date(timestamp));
 };
 const gzdDateTimestamp = (value: string) => {
   const swissDate = value.match(
@@ -892,9 +940,20 @@ const initialWorkflowSettings: WorkflowSettings = {
     "Guten Tag Lieferant,\n\nBestellung {project} wurde ausgelöst.",
   confirmationTemplate:
     "Guten Tag {customer},\n\nIhre Auftragsbestätigung {project} ist bereit.",
+  reorderPointSubject: "Meldebestand erreicht: {sku} · {article}",
+  reorderPointTemplate:
+    "Guten Tag {customer},\n\nder Meldebestand für den Artikel {sku} · {article} wurde erreicht.\n\nAktueller Bestand: {stock} Stück\nMeldebestand: {minimum} Stück\n\nBitte prüfen Sie eine Nachbestellung.\n\nFreundliche Grüsse\nPrintcenter",
+  requestRecipient: "supplier",
+  offerRecipient: "customer",
+  orderRecipient: "system",
+  confirmationRecipient: "customer",
+  reorderPointRecipient: "customer",
   employeeLoginSubject: "Ihr Zugang zum Printcenter von {company}",
   employeeLoginTemplate:
     "Guten Tag {salutation} {lastName},\n\nIhr persönlicher Zugang zum Kundenportal von {company} ist eingerichtet.\n\nPortal: {portalUrl}\nLogin: {email}\nPasswort: {password}\n\nBitte bewahren Sie diese Zugangsdaten sicher auf.\n\nFreundliche Grüsse\nPrintcenter",
+  customerPasswordResetSubject: "Passwort für Ihr Printcenter-Kundenportal zurücksetzen",
+  customerPasswordResetTemplate:
+    "Guten Tag {salutation} {lastName},\n\nüber den folgenden Link können Sie Ihr Passwort für das Kundenportal von {company} neu setzen:\n\n{resetUrl}\n\nDer Link ist {expiresIn} gültig und kann nur einmal verwendet werden. Falls Sie diese Änderung nicht angefordert haben, können Sie diese E-Mail ignorieren.\n\nFreundliche Grüsse\nPrintcenter",
   backendPasswordResetSubject: "Passwort für Printcenter zurücksetzen",
   backendPasswordResetTemplate:
     "Guten Tag {name},\n\nüber den folgenden Link können Sie Ihr Passwort für das Printcenter-Backend neu setzen:\n\n{resetUrl}\n\nDer Link ist {expiresIn} gültig und kann nur einmal verwendet werden. Falls Sie diese Änderung nicht angefordert haben, können Sie diese E-Mail ignorieren.\n\nFreundliche Grüsse\nPrintcenter",
@@ -937,12 +996,14 @@ export function PrintcenterApp({
   initialPortalNumber,
   initialSupplierToken,
   initialBackendResetToken,
+  initialCustomerResetToken,
   initialPortalPreviewToken,
 }: {
   initialRoute: EntryRoute;
   initialPortalNumber?: string;
   initialSupplierToken?: string;
   initialBackendResetToken?: string;
+  initialCustomerResetToken?: string;
   initialPortalPreviewToken?: string;
 }) {
   const [view, setView] = useState<View>("Übersicht");
@@ -1158,6 +1219,7 @@ export function PrintcenterApp({
       if (
         initialRoute !== "backend" &&
         initialRoute !== "backend-reset" &&
+        initialRoute !== "customer-reset" &&
         initialRoute !== "supplier" &&
         !portalSession
       ) {
@@ -1277,6 +1339,12 @@ export function PrintcenterApp({
     }
   }
   async function deleteCustomer(customer: Customer) {
+    if (
+      !window.confirm(
+        `Kunde „${customer.name}“ wirklich löschen? Mitarbeiter-Zugänge und Kundenverknüpfungen werden ebenfalls entfernt.`,
+      )
+    )
+      return;
     try {
       await apiRequest<{ ok: boolean }>(`/api/customers/${customer.id}`, {
         method: "DELETE",
@@ -1512,6 +1580,12 @@ export function PrintcenterApp({
     }
   }
   async function deleteSupplier(supplier: Supplier) {
+    if (
+      !window.confirm(
+        `Lieferant „${supplier.name}“ wirklich löschen? Zugeordnete Artikel bleiben bestehen und werden auf „Nicht zugeordnet“ gesetzt.`,
+      )
+    )
+      return;
     try {
       await apiRequest<{ ok: boolean }>(`/api/suppliers/${supplier.id}`, {
         method: "DELETE",
@@ -1650,6 +1724,12 @@ export function PrintcenterApp({
     setArticleForm(null);
   }
   function deleteArticle(article: Article) {
+    if (
+      !window.confirm(
+        `Artikel „${article.name}“ (${article.sku}) wirklich löschen? Der Lagerverlauf und die hinterlegten GzD-Dateien werden ebenfalls entfernt.`,
+      )
+    )
+      return;
     setArticles((current) => current.filter((item) => item.id !== article.id));
     setNotice(`${article.name} wurde gelöscht.`);
   }
@@ -2490,29 +2570,94 @@ export function PrintcenterApp({
       `Angebot ${offer.number} und alle zugehörigen Anfragebelege wurden gelöscht.`,
     );
   }
-  function updateDocument(data: {
-    id: number;
-    customerId: number;
-    employeeId?: number;
-    articleId: number;
-    quantity: number;
-    unitPrice: number;
-    deliveryDate?: string;
-    note?: string;
-    status: DocumentRecord["status"];
-  }) {
+  function updateDocument(data: DocumentEditData) {
     const customer = customers.find((item) => item.id === data.customerId);
-    const article = articles.find((item) => item.id === data.articleId);
     const employee = customer?.employees.find(
       (item) => item.id === data.employeeId,
     );
-    if (!customer || !article) return;
+    if (!customer) return;
+    const article = data.articleId
+      ? articles.find((item) => item.id === data.articleId)
+      : undefined;
+    if (!data.items?.length && !article) return;
     const assignedSupplier = suppliers.find(
-      (supplier) => supplier.name === article.supplier,
+      (supplier) => supplier.name === article?.supplier,
     );
     setDocuments((current) =>
       current.map((document) => {
         if (document.id !== data.id) return document;
+        if (data.items?.length) {
+          const previousItems = document.items ?? [];
+          const markupPercent =
+            document.type === "Bestellung" ? 0 : customer.markup;
+          const nextItems = data.items
+            .map((draft, index) => {
+              const itemArticle = articles.find(
+                (item) => item.id === draft.articleId,
+              );
+              if (!itemArticle) return null;
+              const requestedQuantities = draft.quantities
+                .map(Number)
+                .filter((quantity) => quantity > 0)
+                .slice(0, 5);
+              const quantity =
+                requestedQuantities[0] || Math.max(1, draft.quantity);
+              const unitPrice =
+                document.type === "Anfrage" ? 0 : Math.max(0, draft.unitPrice);
+              const subtotal = quantity * unitPrice;
+              const markupAmount =
+                document.type === "Anfrage"
+                  ? 0
+                  : (subtotal * markupPercent) / 100;
+              return {
+                ...(previousItems[index] ?? {}),
+                articleId: itemArticle.id,
+                sku: itemArticle.sku,
+                article: itemArticle.name,
+                quantity,
+                requestedQuantities:
+                  document.type === "Anfrage"
+                    ? requestedQuantities
+                    : undefined,
+                unitPrice,
+                subtotal,
+                markupAmount,
+                total: subtotal + markupAmount,
+              } satisfies DocumentItem;
+            })
+            .filter((item): item is DocumentItem => Boolean(item));
+          if (!nextItems.length) return document;
+          const subtotal = nextItems.reduce(
+            (sum, item) => sum + item.subtotal,
+            0,
+          );
+          const markupAmount = nextItems.reduce(
+            (sum, item) => sum + item.markupAmount,
+            0,
+          );
+          return {
+            ...document,
+            customerId: customer.id,
+            customer: customer.name,
+            employeeId: employee?.id,
+            employee: employee?.name ?? "Nicht zugeordnet",
+            articleId: undefined,
+            article: `Sammelanfrage · ${nextItems.length} Artikel`,
+            quantity: nextItems[0].quantity,
+            requestedQuantities: undefined,
+            unitPrice: nextItems[0].unitPrice,
+            subtotal,
+            markupPercent,
+            markupAmount,
+            total: subtotal + markupAmount,
+            items: nextItems,
+            deliveryDate: data.deliveryDate,
+            note: data.note,
+            pdfUrl: undefined,
+            status: data.status,
+          };
+        }
+        if (!article) return document;
         const unitPrice = document.type === "Anfrage" ? 0 : data.unitPrice;
         const subtotal = data.quantity * unitPrice;
         const markupPercent =
@@ -2617,17 +2762,7 @@ export function PrintcenterApp({
     const onEdit = (event: Event) =>
       updateDocument(
         (
-          event as CustomEvent<{
-            id: number;
-            customerId: number;
-            employeeId?: number;
-            articleId: number;
-            quantity: number;
-            unitPrice: number;
-            deliveryDate?: string;
-            note?: string;
-            status: DocumentRecord["status"];
-          }>
+          event as CustomEvent<DocumentEditData>
         ).detail,
       );
     const onDelete = (event: Event) => {
@@ -2957,6 +3092,66 @@ export function PrintcenterApp({
     setBackendUsers((current) => current.filter((item) => item.id !== user.id));
     setNotice(`${user.name} wurde als Backend-Zugang gelöscht.`);
   }
+  async function updatePortalEmployee(
+    customerId: number,
+    employeeId: number,
+    draft: Pick<
+      Employee,
+      "salutation" | "firstName" | "lastName" | "email" | "phone"
+    >,
+  ) {
+    const customer = customers.find((item) => item.id === customerId);
+    const currentEmployee = customer?.employees.find(
+      (item) => item.id === employeeId,
+    );
+    if (!customer || !currentEmployee)
+      throw new Error("Der Mitarbeiterzugang wurde nicht gefunden.");
+    const email = draft.email.trim().toLocaleLowerCase("de-CH");
+    if (
+      customers.some((item) =>
+        item.employees.some(
+          (employee) =>
+            employee.id !== employeeId &&
+            employee.email.toLocaleLowerCase("de-CH") === email,
+        ),
+      )
+    )
+      throw new Error("Diese Mailadresse wird bereits verwendet.");
+    const firstName = (draft.firstName ?? "").trim();
+    const lastName = (draft.lastName ?? "").trim();
+    const name = [firstName, lastName].filter(Boolean).join(" ");
+    if (!name || !email)
+      throw new Error("Vorname, Nachname und Mailadresse sind erforderlich.");
+    const updated = await apiRequest<Employee>(
+      `/api/customers/${customerId}/employees/${employeeId}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          ...currentEmployee,
+          ...draft,
+          firstName,
+          lastName,
+          name,
+          email,
+          login: email,
+          mailToMain: currentEmployee.mailToMain,
+        }),
+      },
+    );
+    setCustomers((current) =>
+      current.map((item) =>
+        item.id === customerId
+          ? {
+              ...item,
+              employees: item.employees.map((employee) =>
+                employee.id === employeeId ? updated : employee,
+              ),
+            }
+          : item,
+      ),
+    );
+    return updated;
+  }
   const supplierRequest = supplierRoute
     ? documents.find(
         (item) =>
@@ -2972,6 +3167,8 @@ export function PrintcenterApp({
     );
   if (initialRoute === "backend-reset" && initialBackendResetToken)
     return <BackendPasswordReset token={initialBackendResetToken} />;
+  if (initialRoute === "customer-reset" && initialCustomerResetToken)
+    return <CustomerPasswordReset token={initialCustomerResetToken} />;
   const portalCustomer = portalRoute
     ? customers.find(
         (item) => item.number.toLowerCase() === portalRoute.toLowerCase(),
@@ -3013,6 +3210,7 @@ export function PrintcenterApp({
           onRefresh={refreshData}
           refreshing={refreshing}
           backendPreview={portalSession.source === "backend-preview"}
+          onEmployeeUpdate={updatePortalEmployee}
         />
       );
   }
@@ -3249,6 +3447,14 @@ export function PrintcenterApp({
                   ...(state.workflowSettings ?? {}),
                 });
               }}
+              onSystemDataPurged={() => {
+                setCustomers([]);
+                setSuppliers([]);
+                setGroups([]);
+                setArticles([]);
+                setDocuments([]);
+                setDocumentFocusId(null);
+              }}
               onWorkflowSave={(event) => {
                 event.preventDefault();
                 const data = new FormData(event.currentTarget);
@@ -3259,11 +3465,38 @@ export function PrintcenterApp({
                   confirmationTemplate: String(
                     data.get("confirmationTemplate") || "",
                   ),
+                  reorderPointSubject: String(
+                    data.get("reorderPointSubject") || "",
+                  ),
+                  reorderPointTemplate: String(
+                    data.get("reorderPointTemplate") || "",
+                  ),
+                  requestRecipient: String(
+                    data.get("requestRecipient") || "supplier",
+                  ) as WorkflowRecipient,
+                  offerRecipient: String(
+                    data.get("offerRecipient") || "customer",
+                  ) as WorkflowRecipient,
+                  orderRecipient: String(
+                    data.get("orderRecipient") || "system",
+                  ) as WorkflowRecipient,
+                  confirmationRecipient: String(
+                    data.get("confirmationRecipient") || "customer",
+                  ) as WorkflowRecipient,
+                  reorderPointRecipient: String(
+                    data.get("reorderPointRecipient") || "customer",
+                  ) as WorkflowRecipient,
                   employeeLoginSubject: String(
                     data.get("employeeLoginSubject") || "",
                   ),
                   employeeLoginTemplate: String(
                     data.get("employeeLoginTemplate") || "",
+                  ),
+                  customerPasswordResetSubject: String(
+                    data.get("customerPasswordResetSubject") || "",
+                  ),
+                  customerPasswordResetTemplate: String(
+                    data.get("customerPasswordResetTemplate") || "",
                   ),
                   backendPasswordResetSubject: String(
                     data.get("backendPasswordResetSubject") || "",
@@ -4641,6 +4874,7 @@ function DocumentsView({
                 <strong className="mono">
                   {document.number}
                   <small>{document.type}</small>
+                  <small>Erstellt: {formatDocumentCreatedAt(document)}</small>
                 </strong>
                 <span>
                   {document.customer}
@@ -4755,18 +4989,15 @@ function EditDocumentForm({
   customers: Customer[];
   articles: Article[];
   onCancel: () => void;
-  onSubmit: (data: {
-    id: number;
-    customerId: number;
-    employeeId?: number;
+  onSubmit: (data: DocumentEditData) => void;
+}) {
+  type ItemDraft = {
     articleId: number;
+    quantities: string[];
     quantity: number;
     unitPrice: number;
-    deliveryDate?: string;
-    note?: string;
-    status: DocumentRecord["status"];
-  }) => void;
-}) {
+  };
+  const isCollective = Boolean(document.items && document.items.length > 1);
   const initialArticle =
     articles.find((article) => article.id === document.articleId) ??
     articles.find((article) => article.name === document.article) ??
@@ -4783,6 +5014,16 @@ function EditDocumentForm({
   const [status, setStatus] = useState<DocumentRecord["status"]>(
     document.status,
   );
+  const [itemDrafts, setItemDrafts] = useState<ItemDraft[]>(() =>
+    (document.items ?? []).map((item) => ({
+      articleId: item.articleId,
+      quantities: Array.from({ length: 5 }, (_, index) =>
+        String(item.requestedQuantities?.[index] ?? ""),
+      ),
+      quantity: item.quantity,
+      unitPrice: item.unitPrice,
+    })),
+  );
   const customer = customers.find((item) => item.id === customerId);
   const isRequest = document.type === "Anfrage";
   const customerPriceDocument =
@@ -4792,8 +5033,26 @@ function EditDocumentForm({
       ? 0
       : (customer?.markup ?? document.markupPercent);
   const total = quantity * unitPrice * (1 + markupPercent / 100);
+  const collectiveSubtotal = itemDrafts.reduce(
+    (sum, item) =>
+      sum +
+      (isRequest
+        ? 0
+        : Math.max(0, item.quantity) * Math.max(0, item.unitPrice)),
+    0,
+  );
+  const collectiveTotal =
+    collectiveSubtotal * (1 + markupPercent / 100);
   const eligibleArticles = articles.filter(
     (article) => article.customerId === customerId,
+  );
+  const collectiveSupplierKey = document.supplier?.startsWith(
+    "Lieferantengruppe · ",
+  )
+    ? `group:${document.supplier.slice("Lieferantengruppe · ".length)}`
+    : document.supplier;
+  const collectiveEligibleArticles = eligibleArticles.filter(
+    (article) => article.supplier === collectiveSupplierKey,
   );
   function changeCustomer(id: number) {
     const nextCustomer = customers.find((item) => item.id === id);
@@ -4813,12 +5072,27 @@ function EditDocumentForm({
           id: document.id,
           customerId,
           employeeId,
-          articleId,
+          articleId: isCollective ? undefined : articleId,
           quantity,
           unitPrice: isRequest ? 0 : unitPrice,
           deliveryDate: deliveryDate || undefined,
           note,
           status,
+          items: isCollective
+            ? itemDrafts.map((item) => ({
+                articleId: item.articleId,
+                quantities: (() => {
+                  const values = item.quantities
+                    .map(Number)
+                    .filter((value) => value > 0);
+                  return values.length
+                    ? values
+                    : [Math.max(1, item.quantity)];
+                })(),
+                quantity: item.quantity,
+                unitPrice: isRequest ? 0 : item.unitPrice,
+              }))
+            : undefined,
         });
       }}
     >
@@ -4861,38 +5135,45 @@ function EditDocumentForm({
             ))}
           </select>
         </label>
-        <label>
-          Artikel
-          <select
-            value={articleId}
-            onChange={(event) => {
-              const id = Number(event.target.value);
-              setArticleId(id);
-              if (!isRequest)
-                setUnitPrice(
-                  articles.find((article) => article.id === id)?.unitPrice ?? 0,
-                );
-            }}
-          >
-            {(eligibleArticles.length ? eligibleArticles : articles).map(
-              (article) => (
-                <option value={article.id} key={article.id}>
-                  {article.name}
-                </option>
-              ),
-            )}
-          </select>
-        </label>
-        <label>
-          Menge
-          <input
-            type="number"
-            min="1"
-            value={quantity}
-            onChange={(event) => setQuantity(Number(event.target.value) || 0)}
-          />
-        </label>
-        {!isRequest && (
+        {!isCollective && (
+          <label>
+            Artikel
+            <select
+              value={articleId}
+              onChange={(event) => {
+                const id = Number(event.target.value);
+                setArticleId(id);
+                if (!isRequest)
+                  setUnitPrice(
+                    articles.find((article) => article.id === id)?.unitPrice ??
+                      0,
+                  );
+              }}
+            >
+              {(eligibleArticles.length ? eligibleArticles : articles).map(
+                (article) => (
+                  <option value={article.id} key={article.id}>
+                    {article.name}
+                  </option>
+                ),
+              )}
+            </select>
+          </label>
+        )}
+        {!isCollective && (
+          <label>
+            Menge
+            <input
+              type="number"
+              min="1"
+              value={quantity}
+              onChange={(event) =>
+                setQuantity(Number(event.target.value) || 0)
+              }
+            />
+          </label>
+        )}
+        {!isCollective && !isRequest && (
           <label>
             Preis / Stück
             <input
@@ -4936,7 +5217,149 @@ function EditDocumentForm({
           />
         </label>
       </div>
-      {isRequest ? (
+      {isCollective && (
+        <section className="collective-document-editor">
+          <div className="panel-heading compact-heading">
+            <div>
+              <p className="eyebrow">SAMMELBELEG</p>
+              <h3>{itemDrafts.length} Artikel vollständig bearbeiten</h3>
+            </div>
+          </div>
+          {itemDrafts.map((item, itemIndex) => {
+            const selectedArticle = articles.find(
+              (article) => article.id === item.articleId,
+            );
+            return (
+              <fieldset key={`${item.articleId}-${itemIndex}`}>
+                <legend>
+                  {itemIndex + 1}. {selectedArticle?.sku ?? "Artikel"}
+                </legend>
+                <label>
+                  Artikel
+                  <select
+                    value={item.articleId}
+                    onChange={(event) => {
+                      const nextArticleId = Number(event.target.value);
+                      setItemDrafts((current) =>
+                        current.map((draft, index) =>
+                          index === itemIndex
+                            ? {
+                                ...draft,
+                                articleId: nextArticleId,
+                                unitPrice:
+                                  articles.find(
+                                    (article) => article.id === nextArticleId,
+                                  )?.unitPrice ?? draft.unitPrice,
+                              }
+                            : draft,
+                        ),
+                      );
+                    }}
+                  >
+                    {(collectiveEligibleArticles.length
+                      ? collectiveEligibleArticles
+                      : eligibleArticles.length
+                        ? eligibleArticles
+                        : articles
+                    ).map((article) => (
+                      <option value={article.id} key={article.id}>
+                        {article.sku} · {article.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {isRequest ? (
+                  <div className="collective-edit-quantities">
+                    {item.quantities.map((value, quantityIndex) => (
+                      <label key={quantityIndex}>
+                        Staffel {quantityIndex + 1}
+                        <input
+                          type="number"
+                          min="1"
+                          value={value}
+                          placeholder="leer"
+                          onChange={(event) =>
+                            setItemDrafts((current) =>
+                              current.map((draft, index) =>
+                                index === itemIndex
+                                  ? {
+                                      ...draft,
+                                      quantities: draft.quantities.map(
+                                        (quantity, index) =>
+                                          index === quantityIndex
+                                            ? event.target.value
+                                            : quantity,
+                                      ),
+                                    }
+                                  : draft,
+                              ),
+                            )
+                          }
+                        />
+                      </label>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="collective-edit-prices">
+                    <label>
+                      Menge
+                      <input
+                        type="number"
+                        min="1"
+                        value={item.quantity}
+                        onChange={(event) =>
+                          setItemDrafts((current) =>
+                            current.map((draft, index) =>
+                              index === itemIndex
+                                ? {
+                                    ...draft,
+                                    quantity: Number(event.target.value) || 0,
+                                  }
+                                : draft,
+                            ),
+                          )
+                        }
+                      />
+                    </label>
+                    <label>
+                      Preis / Stück
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={item.unitPrice}
+                        onChange={(event) =>
+                          setItemDrafts((current) =>
+                            current.map((draft, index) =>
+                              index === itemIndex
+                                ? {
+                                    ...draft,
+                                    unitPrice: Number(event.target.value) || 0,
+                                  }
+                                : draft,
+                            ),
+                          )
+                        }
+                      />
+                    </label>
+                  </div>
+                )}
+              </fieldset>
+            );
+          })}
+        </section>
+      )}
+      {isCollective ? (
+        <div className="request-price-note customer-price-summary">
+          <strong>
+            {isRequest ? "Sammelanfrage ohne Preise" : "Gesamtsumme exkl. MwSt."}
+          </strong>
+          <span>{isRequest ? `${itemDrafts.length} Artikel` : formatMoney(collectiveTotal)}</span>
+          <button className="primary-button" type="submit">
+            Sammelbeleg speichern &amp; PDF neu erzeugen
+          </button>
+        </div>
+      ) : isRequest ? (
         <div className="request-price-note">
           <strong>Keine Preisangaben</strong>
           <span>Der Lieferant ergänzt die Preise erst mit dem Angebot.</span>
@@ -5407,6 +5830,14 @@ function ArticlesView({
                       onCancel={() => setExpandedArticleId(null)}
                     />
                     <section className="article-expanded-side">
+                      <Link
+                        className="secondary-button article-stock-history-link"
+                        href={`/lagerbestand/${article.id}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        Lagerbestandsverlauf öffnen ↗
+                      </Link>
                       <div className="article-gzd-detail">
                         <div className="panel-heading compact-heading">
                           <div>
@@ -6156,6 +6587,7 @@ function CustomerPortal({
   onRefresh,
   refreshing,
   backendPreview,
+  onEmployeeUpdate,
 }: {
   customer: Customer;
   employee: Employee;
@@ -6167,6 +6599,14 @@ function CustomerPortal({
   onRefresh: () => void | Promise<void>;
   refreshing: boolean;
   backendPreview: boolean;
+  onEmployeeUpdate: (
+    customerId: number,
+    employeeId: number,
+    draft: Pick<
+      Employee,
+      "salutation" | "firstName" | "lastName" | "email" | "phone"
+    >,
+  ) => Promise<Employee>;
 }) {
   const [reorderArticle, setReorderArticle] = useState<Article | null>(null);
   const [collectiveSupplier, setCollectiveSupplier] = useState<string | null>(
@@ -6191,6 +6631,7 @@ function CustomerPortal({
     "name" | "sku" | "stock-asc" | "stock-desc"
   >("name");
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [profileSettingsOpen, setProfileSettingsOpen] = useState(false);
   const [requestConfirmation, setRequestConfirmation] = useState<{
     article: string;
     sku: string;
@@ -6421,11 +6862,30 @@ function CustomerPortal({
               {customer.number} · {employee.email}
             </small>
           </span>
+          {!backendPreview && (
+            <button
+              className="portal-button portal-profile-button"
+              type="button"
+              onClick={() => setProfileSettingsOpen(true)}
+            >
+              Meine Einstellungen
+            </button>
+          )}
           <button className="portal-button" onClick={onExit}>
             {backendPreview ? "Portalansicht schliessen" : "Abmelden"}
           </button>
         </div>
       </header>
+      {profileSettingsOpen && (
+        <CustomerProfileSettings
+          customer={customer}
+          employee={employee}
+          onClose={() => setProfileSettingsOpen(false)}
+          onSave={(draft) =>
+            onEmployeeUpdate(customer.id, employee.id, draft)
+          }
+        />
+      )}
       <section className="portal-tiles">
         <button
           className={`portal-tile portal-stock-tile ${stockOpen ? "is-active" : ""}`}
@@ -6483,7 +6943,7 @@ function CustomerPortal({
                 <strong>Gemeinsame Produktionsquelle</strong>
                 <span>
                   Es können nur miteinander kombinierbare Artikel hinzugefügt
-                  werden. Der zuständige Lieferant bleibt vertraulich.
+                  werden.
                 </span>
               </div>
               <button
@@ -6581,9 +7041,15 @@ function CustomerPortal({
                   <div
                     className={`stock-article-row ${expanded ? "is-selected" : ""}`}
                   >
-                    <span className="sku" data-label="SKU">
+                    <Link
+                      className="sku stock-sku-link"
+                      data-label="SKU"
+                      href={`/lagerbestand/${article.id}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
                       {article.sku}
-                    </span>
+                    </Link>
                     <strong>{article.name}</strong>
                     <span data-label="Bestand">{article.stock} Stück</span>
                     <span data-label="Meldebestand">
@@ -8296,6 +8762,157 @@ function SupplierPortalLoading() {
   );
 }
 
+function CustomerProfileSettings({
+  customer,
+  employee,
+  onClose,
+  onSave,
+}: {
+  customer: Customer;
+  employee: Employee;
+  onClose: () => void;
+  onSave: (
+    draft: Pick<
+      Employee,
+      "salutation" | "firstName" | "lastName" | "email" | "phone"
+    >,
+  ) => Promise<Employee>;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [sendingReset, setSendingReset] = useState(false);
+  const [resetSent, setResetSent] = useState(false);
+  const [error, setError] = useState("");
+  return (
+    <div className="modal-backdrop profile-settings-backdrop">
+      <section
+        className="modal-card profile-settings-card customer-profile-settings-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="customer-profile-settings-title"
+      >
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">MEINE EINSTELLUNGEN</p>
+            <h2 id="customer-profile-settings-title">Persönliche Daten</h2>
+            <p className="muted">{customer.name}</p>
+          </div>
+          <button className="secondary-button" type="button" onClick={onClose}>
+            Schliessen
+          </button>
+        </div>
+        <form
+          className="profile-settings-form customer-profile-settings-form"
+          onSubmit={async (event) => {
+            event.preventDefault();
+            if (saving) return;
+            const data = new FormData(event.currentTarget);
+            setSaving(true);
+            setError("");
+            try {
+              await onSave({
+                salutation: String(data.get("salutation") || "Divers") as Salutation,
+                firstName: String(data.get("firstName") || "").trim(),
+                lastName: String(data.get("lastName") || "").trim(),
+                email: String(data.get("email") || "").trim(),
+                phone: String(data.get("phone") || "").trim(),
+              });
+              onClose();
+            } catch (saveError) {
+              setError(
+                saveError instanceof Error
+                  ? saveError.message
+                  : "Die Daten konnten nicht gespeichert werden.",
+              );
+            } finally {
+              setSaving(false);
+            }
+          }}
+        >
+          <label>
+            Anrede
+            <select name="salutation" defaultValue={employee.salutation ?? "Divers"}>
+              <option value="Frau">Frau</option>
+              <option value="Herr">Herr</option>
+              <option value="Divers">Divers</option>
+            </select>
+          </label>
+          <label>
+            Vorname
+            <input
+              name="firstName"
+              defaultValue={employee.firstName ?? employee.name.split(" ")[0] ?? ""}
+              required
+            />
+          </label>
+          <label>
+            Nachname
+            <input
+              name="lastName"
+              defaultValue={
+                employee.lastName ?? employee.name.split(" ").slice(1).join(" ")
+              }
+              required
+            />
+          </label>
+          <label>
+            Mailadresse / Login
+            <input name="email" type="email" defaultValue={employee.email} required />
+          </label>
+          <label className="profile-settings-wide-field">
+            Telefon
+            <input name="phone" type="tel" defaultValue={employee.phone} />
+          </label>
+          {error && <p className="login-error profile-settings-wide-field">{error}</p>}
+          <button className="primary-button profile-settings-wide-field" type="submit" disabled={saving}>
+            {saving ? "Daten werden gespeichert …" : "Daten speichern"}
+          </button>
+        </form>
+        <div className="profile-password-reset customer-password-reset">
+          <div>
+            <strong>Passwort zurücksetzen</strong>
+            <p>
+              Ein einmaliger Link wird an <strong>{employee.email}</strong> gesendet.
+            </p>
+          </div>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={sendingReset || resetSent}
+            onClick={async () => {
+              setSendingReset(true);
+              setError("");
+              try {
+                await apiRequest<{ ok: boolean }>("/api/customer-password-resets", {
+                  method: "POST",
+                  body: JSON.stringify({
+                    customerId: customer.id,
+                    employeeId: employee.id,
+                  }),
+                });
+                setResetSent(true);
+              } catch (resetError) {
+                setError(
+                  resetError instanceof Error
+                    ? resetError.message
+                    : "Der Reset-Link konnte nicht versendet werden.",
+                );
+              } finally {
+                setSendingReset(false);
+              }
+            }}
+          >
+            {resetSent
+              ? "Reset-Link gesendet"
+              : sendingReset
+                ? "Link wird gesendet …"
+                : "Reset-Link senden"}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function BackendProfileSettings({
   user,
   users,
@@ -8408,6 +9025,99 @@ function BackendProfileSettings({
         )}
       </section>
     </div>
+  );
+}
+
+function CustomerPasswordReset({ token }: { token: string }) {
+  const [message, setMessage] = useState("");
+  const [complete, setComplete] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  return (
+    <main className="backend-login customer-password-reset-page">
+      <section className="login-panel">
+        <div className="brand brand--login">
+          <Monogram />
+          <span>
+            print
+            <br />
+            center
+          </span>
+        </div>
+        <p className="eyebrow">KUNDENPORTAL</p>
+        <h1>Neues Passwort setzen.</h1>
+        {complete ? (
+          <>
+            <p className="login-copy">
+              Ihr Passwort wurde aktualisiert. Der Einmal-Link ist nicht mehr
+              gültig.
+            </p>
+            <Link className="primary-button login-link-button" href="/">
+              Zum Kundenportal-Login →
+            </Link>
+          </>
+        ) : (
+          <form
+            onSubmit={async (event) => {
+              event.preventDefault();
+              const data = new FormData(event.currentTarget);
+              const password = String(data.get("password") || "");
+              const confirmation = String(data.get("confirmation") || "");
+              if (password.length < 8) {
+                setMessage("Das Passwort muss mindestens 8 Zeichen haben.");
+                return;
+              }
+              if (password !== confirmation) {
+                setMessage("Die beiden Passwörter stimmen nicht überein.");
+                return;
+              }
+              setSubmitting(true);
+              setMessage("");
+              try {
+                await apiRequest<{ ok: boolean }>(
+                  `/api/customer-password-resets/${encodeURIComponent(token)}`,
+                  {
+                    method: "POST",
+                    body: JSON.stringify({ password }),
+                  },
+                );
+                setComplete(true);
+              } catch (error) {
+                setMessage(
+                  error instanceof Error
+                    ? error.message
+                    : "Das Passwort konnte nicht aktualisiert werden.",
+                );
+              } finally {
+                setSubmitting(false);
+              }
+            }}
+          >
+            <label>
+              Neues Passwort
+              <input name="password" type="password" minLength={8} required />
+            </label>
+            <label>
+              Passwort wiederholen
+              <input
+                name="confirmation"
+                type="password"
+                minLength={8}
+                required
+              />
+            </label>
+            {message && <p className="login-error">{message}</p>}
+            <button className="primary-button" type="submit" disabled={submitting}>
+              {submitting ? "Passwort wird gespeichert …" : "Passwort speichern"}
+            </button>
+          </form>
+        )}
+      </section>
+      <div className="login-art" aria-hidden="true">
+        <span />
+        <i />
+        <b />
+      </div>
+    </main>
   );
 }
 
@@ -8609,6 +9319,7 @@ function LegacySettingsView({
       value: workflow.requestTemplate,
       doc: "attachRequestDocument",
       gzd: "attachRequestGzd",
+      recipient: "requestRecipient",
     },
     {
       key: "offerTemplate",
@@ -8616,6 +9327,7 @@ function LegacySettingsView({
       value: workflow.offerTemplate,
       doc: "attachOfferDocument",
       gzd: "attachOfferGzd",
+      recipient: "offerRecipient",
     },
     {
       key: "orderTemplate",
@@ -8623,6 +9335,7 @@ function LegacySettingsView({
       value: workflow.orderTemplate,
       doc: "attachOrderDocument",
       gzd: "attachOrderGzd",
+      recipient: "orderRecipient",
     },
     {
       key: "confirmationTemplate",
@@ -8630,6 +9343,7 @@ function LegacySettingsView({
       value: workflow.confirmationTemplate,
       doc: "attachConfirmationDocument",
       gzd: "attachConfirmationGzd",
+      recipient: "confirmationRecipient",
     },
   ];
   return (
@@ -8732,6 +9446,21 @@ function LegacySettingsView({
             <fieldset key={field.key}>
               <legend>{field.label}</legend>
               <textarea name={field.key} defaultValue={field.value} rows={4} />
+              <label>
+                Automatisch senden an
+                <select
+                  name={field.recipient}
+                  defaultValue={
+                    workflow[
+                      field.recipient as keyof WorkflowSettings
+                    ] as WorkflowRecipient
+                  }
+                >
+                  <option value="customer">Kunde / zuständiger Mitarbeiter</option>
+                  <option value="supplier">Hinterlegter Lieferant</option>
+                  <option value="system">Systemmail / Standardabsender</option>
+                </select>
+              </label>
               <label className="check-row">
                 <input
                   type="checkbox"
@@ -8754,6 +9483,46 @@ function LegacySettingsView({
               </label>
             </fieldset>
           ))}
+          <fieldset className="reorder-point-template-fieldset">
+            <legend>Meldebestand erreicht</legend>
+            <label>
+              Betreff
+              <input
+                name="reorderPointSubject"
+                defaultValue={workflow.reorderPointSubject}
+                required
+              />
+            </label>
+            <label>
+              E-Mail-Text
+              <textarea
+                name="reorderPointTemplate"
+                defaultValue={workflow.reorderPointTemplate}
+                rows={8}
+                required
+              />
+            </label>
+            <label>
+              Automatisch senden an
+              <select
+                name="reorderPointRecipient"
+                defaultValue={workflow.reorderPointRecipient}
+              >
+                <option value="customer">Kunde / zuständiger Mitarbeiter</option>
+                <option value="supplier">Hinterlegter Lieferant</option>
+                <option value="system">Systemmail / Standardabsender</option>
+              </select>
+            </label>
+            <small className="muted">
+              Platzhalter: {"{customer}"} {"{article}"} {"{sku}"} {"{stock}"}{" "}
+              {"{minimum}"} {"{change}"}
+            </small>
+            <p className="workflow-capability-note">
+              Das System erkennt einen neu erreichten oder unterschrittenen
+              Meldebestand bei Bestandsimporten. Der Versand kann aktiviert
+              werden, sobald der SFTP-Abruf produktiv verbunden ist.
+            </p>
+          </fieldset>
           <fieldset className="employee-login-template-fieldset">
             <legend>Mitarbeiter-Zugang</legend>
             <label>
@@ -8777,6 +9546,31 @@ function LegacySettingsView({
               Platzhalter: {"{company}"} {"{salutation}"} {"{firstName}"}{" "}
               {"{lastName}"} {"{employee}"} {"{email}"} {"{password}"}{" "}
               {"{portalUrl}"}
+            </small>
+          </fieldset>
+          <fieldset className="employee-login-template-fieldset">
+            <legend>Kundenportal-Passwort zurücksetzen</legend>
+            <label>
+              Betreff
+              <input
+                name="customerPasswordResetSubject"
+                defaultValue={workflow.customerPasswordResetSubject}
+                required
+              />
+            </label>
+            <label>
+              E-Mail-Text
+              <textarea
+                name="customerPasswordResetTemplate"
+                defaultValue={workflow.customerPasswordResetTemplate}
+                rows={9}
+                required
+              />
+            </label>
+            <small className="muted">
+              Platzhalter: {"{company}"} {"{salutation}"} {"{firstName}"}{" "}
+              {"{lastName}"} {"{employee}"} {"{email}"} {"{resetUrl}"}{" "}
+              {"{expiresIn}"}
             </small>
           </fieldset>
           <fieldset className="employee-login-template-fieldset">
@@ -8810,21 +9604,7 @@ function LegacySettingsView({
               defaultValue={workflow.supplierOfferSubject}
             />
           </label>
-          <label>
-            Angebot senden an
-            <input
-              name="offerEmail"
-              type="email"
-              defaultValue={workflow.offerEmail}
-            />
-          </label>
-          <div className="workflow-order-recipient">
-            <strong>Empfänger für Kundenbestellungen</strong>
-            <p>
-              Bestellungen werden automatisch an die E-Mail-Adresse des unter
-              E-Mail-Einstellungen markierten Standardabsenders gesendet.
-            </p>
-          </div>
+          <input name="offerEmail" type="hidden" value={workflow.offerEmail} />
           <button className="primary-button" type="submit">
             Vorlagen, Anhänge &amp; Empfänger speichern
           </button>
@@ -8885,6 +9665,7 @@ type SettingsProps = {
   currentUser: BackendUser;
   workflow: WorkflowSettings;
   onStateImported: (state: PersistedState) => void;
+  onSystemDataPurged: () => void;
   onWorkflowSave: (event: FormEvent<HTMLFormElement>) => void;
   onCreate: (event: FormEvent<HTMLFormElement>) => void;
   onEdit: (id: number, name: string, email: string, password: string) => void;
@@ -8901,6 +9682,18 @@ const emptyIntegrationSettings: IntegrationSettings = {
   ftpPort: "22",
   ftpUsername: "",
   ftpDirectory: "/printcenter",
+  sftpPullIntervalMinutes: 60,
+  sftpCsvEntity: "articles",
+  sftpCsvDelimiter: ";",
+  sftpCsvHasHeader: true,
+  sftpCsvFilePattern: "*.csv",
+  sftpCsvMappings: [
+    { csvColumn: "sku", targetField: "sku" },
+    { csvColumn: "designation_1", targetField: "designation_1" },
+    { csvColumn: "designation_2", targetField: "designation_2" },
+    { csvColumn: "customer_number", targetField: "customer_number" },
+    { csvColumn: "supplier_or_group", targetField: "supplier_or_group" },
+  ],
 };
 const csvTemplates = {
   customers: {
@@ -8978,6 +9771,7 @@ function SettingsView(props: SettingsProps) {
         <ImportExportSettings
           workflow={props.workflow}
           onStateImported={props.onStateImported}
+          onSystemDataPurged={props.onSystemDataPurged}
         />
       )}
       {section === "Anbindungen" && <IntegrationSettingsPanel />}
@@ -8988,9 +9782,11 @@ function SettingsView(props: SettingsProps) {
 function ImportExportSettings({
   workflow,
   onStateImported,
+  onSystemDataPurged,
 }: {
   workflow: WorkflowSettings;
   onStateImported: (state: PersistedState) => void;
+  onSystemDataPurged: () => void;
 }) {
   const [importType, setImportType] =
     useState<keyof typeof csvTemplates>("customers");
@@ -9000,6 +9796,7 @@ function ImportExportSettings({
   >("progress");
   const [progress, setProgress] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [purgeConfirmation, setPurgeConfirmation] = useState("");
   const updateImportProgress = async (
     processed: number,
     total: number,
@@ -9150,6 +9947,7 @@ function ImportExportSettings({
       );
       const state = await apiRequest<PersistedState>("/api/state");
       let imported = 0;
+      let reorderPointsReached = 0;
       const skippedReasons = new Map<string, number>();
       const skip = (reason: string) =>
         skippedReasons.set(reason, (skippedReasons.get(reason) ?? 0) + 1);
@@ -9292,8 +10090,35 @@ function ImportExportSettings({
             await updateImportProgress(rowIndex + 1, rows.length);
             continue;
           }
-          if (state.articles.some((item) => item.sku === row.sku)) {
-            skip("SKU bereits vorhanden");
+          const existingIndex = state.articles.findIndex(
+            (item) => item.sku === row.sku,
+          );
+          if (existingIndex >= 0) {
+            const existing = state.articles[existingIndex];
+            const nextStock = Number(row.stock);
+            if (!Number.isFinite(nextStock) || row.stock === "") {
+              skip("Bestand für bestehende SKU fehlt");
+              await updateImportProgress(rowIndex + 1, rows.length);
+              continue;
+            }
+            if (existing.stock === nextStock) {
+              skip("Bestand unverändert");
+              await updateImportProgress(rowIndex + 1, rows.length);
+              continue;
+            }
+            if (
+              reachesReorderPoint(existing.stock, nextStock, existing.minimum)
+            )
+              reorderPointsReached += 1;
+            state.articles[existingIndex] = applyStockSnapshot(
+              existing,
+              nextStock,
+              {
+                date: new Date().toISOString(),
+                reason: "Bestandsimport per CSV",
+              },
+            );
+            imported += 1;
             await updateImportProgress(rowIndex + 1, rows.length);
             continue;
           }
@@ -9374,7 +10199,7 @@ function ImportExportSettings({
       setProgress(100);
       setMessageKind("success");
       setMessage(
-        `${imported} Datensätze erfolgreich importiert.${reasonSummary ? ` Übersprungen: ${reasonSummary}.` : " Keine Zeilen wurden übersprungen."} Die Sitzung bleibt aktiv.`,
+        `${imported} Datensätze erfolgreich importiert.${reorderPointsReached ? ` Bei ${reorderPointsReached} Artikel(n) wurde der Meldebestand neu erreicht.` : ""}${reasonSummary ? ` Übersprungen: ${reasonSummary}.` : " Keine Zeilen wurden übersprungen."} Die Sitzung bleibt aktiv.`,
       );
     } catch (error) {
       setMessageKind("error");
@@ -9382,6 +10207,47 @@ function ImportExportSettings({
         error instanceof Error
           ? `Import fehlgeschlagen: ${error.message}`
           : "Die CSV-Datei konnte nicht importiert werden.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function purgeSystemData() {
+    if (purgeConfirmation !== "ALLE DATEN LÖSCHEN") return;
+    if (
+      !window.confirm(
+        "Kunden, Mitarbeiter, Lieferanten, Artikel, Lagerdaten, Projekte, Belege und Dateien endgültig löschen?",
+      )
+    )
+      return;
+    setBusy(true);
+    setProgress(20);
+    setMessageKind("progress");
+    setMessage("Betriebsdaten werden vollständig gelöscht …");
+    try {
+      const result = await apiRequest<{
+        ok: boolean;
+        deletedFiles: number;
+        fileCleanupWarning?: string;
+      }>("/api/system-data", {
+        method: "DELETE",
+        body: JSON.stringify({ confirmation: purgeConfirmation }),
+      });
+      onSystemDataPurged();
+      setPurgeConfirmation("");
+      setProgress(100);
+      setMessageKind("success");
+      setMessage(
+        result.fileCleanupWarning
+          ? `Alle Betriebsdaten wurden gelöscht. Hinweis zum Dateispeicher: ${result.fileCleanupWarning}`
+          : `Alle Betriebsdaten und ${result.deletedFiles} gespeicherte Dateien wurden gelöscht. Backend-Zugänge und technische Einstellungen bleiben erhalten.`,
+      );
+    } catch (error) {
+      setMessageKind("error");
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Die Betriebsdaten konnten nicht gelöscht werden.",
       );
     } finally {
       setBusy(false);
@@ -9512,6 +10378,33 @@ function ImportExportSettings({
           Bestehende Datensätze bleiben erhalten. Duplikate anhand Kundennummer,
           Lieferantennummer, Mitarbeiter-Mail oder SKU werden übersprungen.
         </p>
+      </section>
+      <section className="panel system-purge-panel">
+        <p className="eyebrow">GEFAHRENZONE</p>
+        <h2>Alle Betriebsdaten löschen</h2>
+        <p>
+          Entfernt Kunden, Kunden-Mitarbeiter, Lieferanten, Gruppen, Artikel,
+          Lagerverläufe, GzD-Dateien, Projekte und sämtliche Belege. Deine
+          Backend-Zugänge, Vorlagen, E-Mail-Absender und Anbindungen bleiben
+          erhalten, damit der Zugang zum System bestehen bleibt.
+        </p>
+        <label>
+          Zur Bestätigung „ALLE DATEN LÖSCHEN“ eingeben
+          <input
+            value={purgeConfirmation}
+            onChange={(event) => setPurgeConfirmation(event.target.value)}
+            placeholder="ALLE DATEN LÖSCHEN"
+            autoComplete="off"
+          />
+        </label>
+        <button
+          className="system-purge-button"
+          type="button"
+          disabled={busy || purgeConfirmation !== "ALLE DATEN LÖSCHEN"}
+          onClick={() => void purgeSystemData()}
+        >
+          Betriebsdaten endgültig löschen
+        </button>
       </section>
     </section>
   );
@@ -9953,7 +10846,8 @@ function EmailSettingsPanel() {
 
 function IntegrationSettingsPanel() {
   const [settings, setSettings] = useState(emptyIntegrationSettings);
-  const [, setMessage] = useState("Konfigurationen werden geladen …");
+  const [message, setMessage] = useState("Konfigurationen werden geladen …");
+  const [mappingOpen, setMappingOpen] = useState(false);
   useEffect(() => {
     let active = true;
     void apiRequest<IntegrationSettings>("/api/integrations")
@@ -10144,14 +11038,257 @@ function IntegrationSettingsPanel() {
               placeholder="/printcenter"
             />
           </label>
+          <label>
+            CSV-Dateimuster
+            <input
+              value={settings.sftpCsvFilePattern}
+              onChange={(event) =>
+                setSettings({
+                  ...settings,
+                  sftpCsvFilePattern: event.target.value,
+                })
+              }
+              placeholder="*.csv"
+            />
+          </label>
+          <label>
+            Daten abrufen
+            <select
+              value={settings.sftpPullIntervalMinutes}
+              onChange={(event) =>
+                setSettings({
+                  ...settings,
+                  sftpPullIntervalMinutes: Number(event.target.value),
+                })
+              }
+            >
+              <option value={0}>Nur manuell</option>
+              <option value={15}>Alle 15 Minuten</option>
+              <option value={30}>Alle 30 Minuten</option>
+              <option value={60}>Stündlich</option>
+              <option value={180}>Alle 3 Stunden</option>
+              <option value={360}>Alle 6 Stunden</option>
+              <option value={720}>Alle 12 Stunden</option>
+              <option value={1440}>Täglich</option>
+            </select>
+          </label>
+        </div>
+        <div className="sftp-mapping-summary">
+          <div>
+            <strong>CSV-Datenmapping</strong>
+            <span>
+              {settings.sftpCsvMappings.length} Zuordnungen · Importziel {" "}
+              {settings.sftpCsvEntity === "customers"
+                ? "Kunden"
+                : settings.sftpCsvEntity === "suppliers"
+                  ? "Lieferanten"
+                  : "Artikel"}
+            </span>
+          </div>
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => setMappingOpen(true)}
+          >
+            Datenmapping konfigurieren
+          </button>
         </div>
       </section>
       <div className="integration-save">
+        <p>{message}</p>
         <button className="primary-button" type="submit">
           Anbindungen speichern
         </button>
       </div>
+      {mappingOpen && (
+        <SftpCsvMappingDialog
+          settings={settings}
+          onChange={setSettings}
+          onClose={() => setMappingOpen(false)}
+        />
+      )}
     </form>
+  );
+}
+
+const sftpTargetFields: Record<
+  IntegrationSettings["sftpCsvEntity"],
+  Array<{ value: string; label: string }>
+> = {
+  customers: [
+    { value: "customer_number", label: "Kundennummer" },
+    { value: "name", label: "Firma" },
+    { value: "main_email", label: "Hauptmail" },
+    { value: "phone", label: "Telefon" },
+    { value: "street", label: "Strasse" },
+    { value: "postal_code", label: "PLZ" },
+    { value: "city", label: "Ort" },
+    { value: "country", label: "Land" },
+    { value: "markup_percent", label: "Markup in Prozent" },
+  ],
+  suppliers: [
+    { value: "supplier_number", label: "Lieferantennummer" },
+    { value: "name", label: "Lieferantenname" },
+    { value: "group", label: "Lieferantengruppe" },
+    { value: "contact", label: "Kontaktperson" },
+    { value: "email", label: "E-Mail" },
+    { value: "phone", label: "Telefon" },
+  ],
+  articles: [
+    { value: "sku", label: "Artikelnummer / SKU" },
+    { value: "designation_1", label: "Bezeichnung 1" },
+    { value: "designation_2", label: "Bezeichnung 2" },
+    { value: "customer_number", label: "Kundennummer" },
+    { value: "supplier_or_group", label: "Lieferant oder Gruppe" },
+    { value: "stock", label: "Bestand" },
+    { value: "reorder_point", label: "Meldebestand" },
+    { value: "unit_price", label: "Preis / Stück" },
+  ],
+};
+
+function SftpCsvMappingDialog({
+  settings,
+  onChange,
+  onClose,
+}: {
+  settings: IntegrationSettings;
+  onChange: (settings: IntegrationSettings) => void;
+  onClose: () => void;
+}) {
+  const targetFields = sftpTargetFields[settings.sftpCsvEntity];
+  return (
+    <div className="modal-backdrop sftp-mapping-backdrop">
+      <section className="modal-card sftp-mapping-card" role="dialog">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">SFTP · CSV</p>
+            <h2>Datenmapping konfigurieren</h2>
+          </div>
+          <button className="secondary-button" type="button" onClick={onClose}>
+            Schliessen
+          </button>
+        </div>
+        <div className="sftp-mapping-options">
+          <label>
+            Importziel
+            <select
+              value={settings.sftpCsvEntity}
+              onChange={(event) => {
+                const entity = event.target
+                  .value as IntegrationSettings["sftpCsvEntity"];
+                onChange({ ...settings, sftpCsvEntity: entity, sftpCsvMappings: [] });
+              }}
+            >
+              <option value="customers">Kunden</option>
+              <option value="suppliers">Lieferanten</option>
+              <option value="articles">Artikel</option>
+            </select>
+          </label>
+          <label>
+            Trennzeichen
+            <select
+              value={settings.sftpCsvDelimiter}
+              onChange={(event) =>
+                onChange({
+                  ...settings,
+                  sftpCsvDelimiter: event.target
+                    .value as IntegrationSettings["sftpCsvDelimiter"],
+                })
+              }
+            >
+              <option value=";">Semikolon (;)</option>
+              <option value=",">Komma (,)</option>
+              <option value="tab">Tabulator</option>
+            </select>
+          </label>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={settings.sftpCsvHasHeader}
+              onChange={(event) =>
+                onChange({ ...settings, sftpCsvHasHeader: event.target.checked })
+              }
+            />
+            Erste Zeile enthält Spaltennamen
+          </label>
+        </div>
+        <div className="sftp-mapping-list">
+          <div className="sftp-mapping-head">
+            <strong>CSV-Spalte</strong>
+            <strong>Printcenter-Feld</strong>
+            <span />
+          </div>
+          {settings.sftpCsvMappings.map((mapping, index) => (
+            <div className="sftp-mapping-row" key={`${index}-${mapping.targetField}`}>
+              <input
+                aria-label={`CSV-Spalte ${index + 1}`}
+                value={mapping.csvColumn}
+                onChange={(event) => {
+                  const mappings = [...settings.sftpCsvMappings];
+                  mappings[index] = { ...mapping, csvColumn: event.target.value };
+                  onChange({ ...settings, sftpCsvMappings: mappings });
+                }}
+                placeholder="z. B. article_no"
+              />
+              <select
+                aria-label={`Printcenter-Feld ${index + 1}`}
+                value={mapping.targetField}
+                onChange={(event) => {
+                  const mappings = [...settings.sftpCsvMappings];
+                  mappings[index] = { ...mapping, targetField: event.target.value };
+                  onChange({ ...settings, sftpCsvMappings: mappings });
+                }}
+              >
+                <option value="">Feld auswählen</option>
+                {targetFields.map((field) => (
+                  <option value={field.value} key={field.value}>
+                    {field.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                className="icon-action"
+                type="button"
+                aria-label={`Zuordnung ${index + 1} entfernen`}
+                onClick={() =>
+                  onChange({
+                    ...settings,
+                    sftpCsvMappings: settings.sftpCsvMappings.filter(
+                      (_, mappingIndex) => mappingIndex !== index,
+                    ),
+                  })
+                }
+              >
+                ×
+              </button>
+            </div>
+          ))}
+          {!settings.sftpCsvMappings.length && (
+            <p className="muted">Noch keine CSV-Spalten zugeordnet.</p>
+          )}
+        </div>
+        <div className="form-actions-wide">
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() =>
+              onChange({
+                ...settings,
+                sftpCsvMappings: [
+                  ...settings.sftpCsvMappings,
+                  { csvColumn: "", targetField: "" },
+                ],
+              })
+            }
+          >
+            + Zuordnung hinzufügen
+          </button>
+          <button className="primary-button" type="button" onClick={onClose}>
+            Mapping übernehmen
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 

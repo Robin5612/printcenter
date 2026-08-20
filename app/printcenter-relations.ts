@@ -58,3 +58,43 @@ export function isOrderForSupplier(
     supplier.name.trim().toLocaleLowerCase("de-CH")
   );
 }
+
+export type StockTrackedArticle = {
+  stock: number;
+  minimum: number;
+  stockHistory: Array<{
+    date: string;
+    change: number;
+    stock: number;
+    reason: string;
+  }>;
+};
+
+export function reachesReorderPoint(
+  previousStock: number,
+  nextStock: number,
+  reorderPoint: number,
+) {
+  return previousStock > reorderPoint && nextStock <= reorderPoint;
+}
+
+export function applyStockSnapshot<T extends StockTrackedArticle>(
+  article: T,
+  nextStock: number,
+  options: { date: string; reason: string },
+): T {
+  if (!Number.isFinite(nextStock) || article.stock === nextStock) return article;
+  return {
+    ...article,
+    stock: nextStock,
+    stockHistory: [
+      {
+        date: options.date,
+        change: nextStock - article.stock,
+        stock: nextStock,
+        reason: options.reason,
+      },
+      ...article.stockHistory,
+    ],
+  };
+}

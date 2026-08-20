@@ -208,8 +208,17 @@ type StateWorkflow = {
   offerTemplate: string;
   orderTemplate: string;
   confirmationTemplate: string;
+  reorderPointSubject: string;
+  reorderPointTemplate: string;
+  requestRecipient: "customer" | "supplier" | "system";
+  offerRecipient: "customer" | "supplier" | "system";
+  orderRecipient: "customer" | "supplier" | "system";
+  confirmationRecipient: "customer" | "supplier" | "system";
+  reorderPointRecipient: "customer" | "supplier" | "system";
   employeeLoginSubject: string;
   employeeLoginTemplate: string;
+  customerPasswordResetSubject: string;
+  customerPasswordResetTemplate: string;
   backendPasswordResetSubject: string;
   backendPasswordResetTemplate: string;
   supplierOfferSubject: string;
@@ -539,7 +548,7 @@ async function ensureColumn(
   if (
     !/^[a-z_][a-z0-9_]*$/.test(table) ||
     !/^[a-z_][a-z0-9_]*$/.test(column) ||
-    !/^[A-Z0-9_ '[\]().-]+$/.test(definition)
+    !/^[A-Za-z0-9_ '[\]().*;,-]+$/.test(definition)
   )
     throw new Error("Invalid schema identifier");
   const columns = await db
@@ -687,10 +696,10 @@ async function ensureFullSchema(db: D1Database) {
       "CREATE TABLE IF NOT EXISTS backend_users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, role TEXT NOT NULL DEFAULT 'operator', password_hash TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
     ),
     db.prepare(
-      "CREATE TABLE IF NOT EXISTS workflow_settings (id INTEGER PRIMARY KEY AUTOINCREMENT, request_template TEXT NOT NULL, offer_template TEXT NOT NULL, order_template TEXT NOT NULL, confirmation_template TEXT NOT NULL, employee_login_subject TEXT NOT NULL DEFAULT 'Ihr Zugang zum Printcenter von {company}', employee_login_template TEXT NOT NULL DEFAULT 'Guten Tag {salutation} {lastName},\\n\\nIhr persönlicher Zugang zum Kundenportal von {company} ist eingerichtet.\\n\\nPortal: {portalUrl}\\nLogin: {email}\\nPasswort: {password}\\n\\nBitte bewahren Sie diese Zugangsdaten sicher auf.\\n\\nFreundliche Grüsse\\nPrintcenter', backend_password_reset_subject TEXT NOT NULL DEFAULT 'Passwort für Printcenter zurücksetzen', backend_password_reset_template TEXT NOT NULL DEFAULT 'Guten Tag {name},\\n\\nüber den folgenden Link können Sie Ihr Passwort für das Printcenter-Backend neu setzen:\\n\\n{resetUrl}\\n\\nDer Link ist {expiresIn} gültig und kann nur einmal verwendet werden. Falls Sie diese Änderung nicht angefordert haben, können Sie diese E-Mail ignorieren.\\n\\nFreundliche Grüsse\\nPrintcenter', supplier_offer_subject TEXT NOT NULL, offer_email TEXT NOT NULL, order_email TEXT NOT NULL, attach_request_document INTEGER NOT NULL DEFAULT 1, attach_request_gzd INTEGER NOT NULL DEFAULT 1, attach_offer_document INTEGER NOT NULL DEFAULT 1, attach_offer_gzd INTEGER NOT NULL DEFAULT 1, attach_order_document INTEGER NOT NULL DEFAULT 1, attach_order_gzd INTEGER NOT NULL DEFAULT 1, attach_confirmation_document INTEGER NOT NULL DEFAULT 1, attach_confirmation_gzd INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+      "CREATE TABLE IF NOT EXISTS workflow_settings (id INTEGER PRIMARY KEY AUTOINCREMENT, request_template TEXT NOT NULL, offer_template TEXT NOT NULL, order_template TEXT NOT NULL, confirmation_template TEXT NOT NULL, reorder_point_subject TEXT, reorder_point_template TEXT, request_recipient TEXT NOT NULL DEFAULT 'supplier', offer_recipient TEXT NOT NULL DEFAULT 'customer', order_recipient TEXT NOT NULL DEFAULT 'system', confirmation_recipient TEXT NOT NULL DEFAULT 'customer', reorder_point_recipient TEXT NOT NULL DEFAULT 'customer', employee_login_subject TEXT NOT NULL DEFAULT 'Ihr Zugang zum Printcenter von {company}', employee_login_template TEXT NOT NULL DEFAULT 'Guten Tag {salutation} {lastName},\\n\\nIhr persönlicher Zugang zum Kundenportal von {company} ist eingerichtet.\\n\\nPortal: {portalUrl}\\nLogin: {email}\\nPasswort: {password}\\n\\nBitte bewahren Sie diese Zugangsdaten sicher auf.\\n\\nFreundliche Grüsse\\nPrintcenter', backend_password_reset_subject TEXT NOT NULL DEFAULT 'Passwort für Printcenter zurücksetzen', backend_password_reset_template TEXT NOT NULL DEFAULT 'Guten Tag {name},\\n\\nüber den folgenden Link können Sie Ihr Passwort für das Printcenter-Backend neu setzen:\\n\\n{resetUrl}\\n\\nDer Link ist {expiresIn} gültig und kann nur einmal verwendet werden. Falls Sie diese Änderung nicht angefordert haben, können Sie diese E-Mail ignorieren.\\n\\nFreundliche Grüsse\\nPrintcenter', supplier_offer_subject TEXT NOT NULL, offer_email TEXT NOT NULL, order_email TEXT NOT NULL, attach_request_document INTEGER NOT NULL DEFAULT 1, attach_request_gzd INTEGER NOT NULL DEFAULT 1, attach_offer_document INTEGER NOT NULL DEFAULT 1, attach_offer_gzd INTEGER NOT NULL DEFAULT 1, attach_order_document INTEGER NOT NULL DEFAULT 1, attach_order_gzd INTEGER NOT NULL DEFAULT 1, attach_confirmation_document INTEGER NOT NULL DEFAULT 1, attach_confirmation_gzd INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
     ),
     db.prepare(
-      "CREATE TABLE IF NOT EXISTS integration_settings (id INTEGER PRIMARY KEY, navision_endpoint TEXT NOT NULL DEFAULT '', navision_tenant TEXT NOT NULL DEFAULT '', api_base_url TEXT NOT NULL DEFAULT '', api_client_id TEXT NOT NULL DEFAULT '', ftp_protocol TEXT NOT NULL DEFAULT 'SFTP', ftp_host TEXT NOT NULL DEFAULT '', ftp_port TEXT NOT NULL DEFAULT '22', ftp_username TEXT NOT NULL DEFAULT '', ftp_directory TEXT NOT NULL DEFAULT '/printcenter', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+      "CREATE TABLE IF NOT EXISTS integration_settings (id INTEGER PRIMARY KEY, navision_endpoint TEXT NOT NULL DEFAULT '', navision_tenant TEXT NOT NULL DEFAULT '', api_base_url TEXT NOT NULL DEFAULT '', api_client_id TEXT NOT NULL DEFAULT '', ftp_protocol TEXT NOT NULL DEFAULT 'SFTP', ftp_host TEXT NOT NULL DEFAULT '', ftp_port TEXT NOT NULL DEFAULT '22', ftp_username TEXT NOT NULL DEFAULT '', ftp_directory TEXT NOT NULL DEFAULT '/printcenter', sftp_pull_interval_minutes INTEGER NOT NULL DEFAULT 60, sftp_csv_entity TEXT NOT NULL DEFAULT 'articles', sftp_csv_delimiter TEXT NOT NULL DEFAULT ';', sftp_csv_has_header INTEGER NOT NULL DEFAULT 1, sftp_csv_file_pattern TEXT NOT NULL DEFAULT '*.csv', sftp_csv_mapping_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
     ),
     db.prepare(
       "CREATE TABLE IF NOT EXISTS email_sender_profiles (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL, provider TEXT NOT NULL DEFAULT 'custom', from_name TEXT NOT NULL, from_email TEXT NOT NULL, reply_to TEXT NOT NULL DEFAULT '', smtp_host TEXT NOT NULL, smtp_port INTEGER NOT NULL DEFAULT 587, security TEXT NOT NULL DEFAULT 'starttls', username TEXT NOT NULL, password_ciphertext TEXT, active INTEGER NOT NULL DEFAULT 1, is_default INTEGER NOT NULL DEFAULT 0, last_tested_at TEXT, last_test_status TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
@@ -793,6 +802,18 @@ async function ensureFullSchema(db: D1Database) {
   await ensureColumn(
     db,
     "workflow_settings",
+    "customer_password_reset_subject",
+    "TEXT",
+  );
+  await ensureColumn(
+    db,
+    "workflow_settings",
+    "customer_password_reset_template",
+    "TEXT",
+  );
+  await ensureColumn(
+    db,
+    "workflow_settings",
     "backend_password_reset_subject",
     "TEXT",
   );
@@ -801,6 +822,49 @@ async function ensureFullSchema(db: D1Database) {
     "workflow_settings",
     "backend_password_reset_template",
     "TEXT",
+  );
+  await ensureColumn(db, "workflow_settings", "reorder_point_subject", "TEXT");
+  await ensureColumn(db, "workflow_settings", "reorder_point_template", "TEXT");
+  await ensureColumn(db, "workflow_settings", "request_recipient", "TEXT NOT NULL DEFAULT 'supplier'");
+  await ensureColumn(db, "workflow_settings", "offer_recipient", "TEXT NOT NULL DEFAULT 'customer'");
+  await ensureColumn(db, "workflow_settings", "order_recipient", "TEXT NOT NULL DEFAULT 'system'");
+  await ensureColumn(db, "workflow_settings", "confirmation_recipient", "TEXT NOT NULL DEFAULT 'customer'");
+  await ensureColumn(db, "workflow_settings", "reorder_point_recipient", "TEXT NOT NULL DEFAULT 'customer'");
+  await ensureColumn(
+    db,
+    "integration_settings",
+    "sftp_pull_interval_minutes",
+    "INTEGER NOT NULL DEFAULT 60",
+  );
+  await ensureColumn(
+    db,
+    "integration_settings",
+    "sftp_csv_entity",
+    "TEXT NOT NULL DEFAULT 'articles'",
+  );
+  await ensureColumn(
+    db,
+    "integration_settings",
+    "sftp_csv_delimiter",
+    "TEXT NOT NULL DEFAULT ';'",
+  );
+  await ensureColumn(
+    db,
+    "integration_settings",
+    "sftp_csv_has_header",
+    "INTEGER NOT NULL DEFAULT 1",
+  );
+  await ensureColumn(
+    db,
+    "integration_settings",
+    "sftp_csv_file_pattern",
+    "TEXT NOT NULL DEFAULT '*.csv'",
+  );
+  await ensureColumn(
+    db,
+    "integration_settings",
+    "sftp_csv_mapping_json",
+    "TEXT NOT NULL DEFAULT '[]'",
   );
   await db.prepare("PRAGMA optimize").run();
 }
@@ -1218,7 +1282,7 @@ async function sendRequestEmails(
 
   const requestRow = await db
     .prepare(
-      "SELECT a.id AS article_id, a.sku, a.designation_1, a.designation_2, a.supplier_id, a.supplier_group_id, c.id AS customer_id, c.name AS customer_name, c.markup_percent, e.id AS employee_id, e.name AS employee_name, s.name AS supplier_name, g.name AS group_name FROM articles a JOIN customers c ON c.id = a.customer_id JOIN customer_employees e ON e.id = ? AND e.customer_id = c.id AND e.active = 1 LEFT JOIN suppliers s ON s.id = a.supplier_id LEFT JOIN supplier_groups g ON g.id = a.supplier_group_id WHERE a.id = ? AND c.id = ?",
+      "SELECT a.id AS article_id, a.sku, a.designation_1, a.designation_2, a.supplier_id, a.supplier_group_id, c.id AS customer_id, c.name AS customer_name, c.email AS customer_email, c.markup_percent, e.id AS employee_id, e.name AS employee_name, e.email AS employee_email, e.mail_to_main, s.name AS supplier_name, g.name AS group_name FROM articles a JOIN customers c ON c.id = a.customer_id JOIN customer_employees e ON e.id = ? AND e.customer_id = c.id AND e.active = 1 LEFT JOIN suppliers s ON s.id = a.supplier_id LEFT JOIN supplier_groups g ON g.id = a.supplier_group_id WHERE a.id = ? AND c.id = ?",
     )
     .bind(employeeId, articleId, customerId)
     .first<Record<string, string | number | null>>();
@@ -1249,21 +1313,13 @@ async function sendRequestEmails(
     recipientRows = suppliers.results;
     targetLabel = `Lieferantengruppe · ${String(requestRow.group_name || "")}`;
   }
-  const recipients = Array.from(
+  const supplierRecipients = Array.from(
     new Set(
       recipientRows
         .map((row) => String(row.email || "").trim().toLowerCase())
         .filter(validEmail),
     ),
   );
-  if (!recipients.length)
-    return json(
-      {
-        error:
-          "Beim hinterlegten Lieferanten ist keine gültige E-Mail-Adresse vorhanden.",
-      },
-      { status: 400 },
-    );
 
   const sender = await db
     .prepare(
@@ -1280,13 +1336,35 @@ async function sendRequestEmails(
     );
   const workflow = await db
     .prepare(
-      "SELECT request_template, supplier_offer_subject, attach_request_document, attach_request_gzd FROM workflow_settings ORDER BY id LIMIT 1",
+      "SELECT request_template, request_recipient, supplier_offer_subject, attach_request_document, attach_request_gzd FROM workflow_settings ORDER BY id LIMIT 1",
     )
     .first<Record<string, string | number | null>>();
   if (!workflow)
     return json(
       { error: "Die Anfragevorlage wurde nicht gefunden." },
       { status: 500 },
+    );
+  const customerRecipients = Array.from(
+    new Set(
+      [
+        String(requestRow.employee_email || "").trim().toLowerCase(),
+        Number(requestRow.mail_to_main)
+          ? String(requestRow.customer_email || "").trim().toLowerCase()
+          : "",
+      ].filter(validEmail),
+    ),
+  );
+  const recipientKind = String(workflow.request_recipient || "supplier");
+  const recipients =
+    recipientKind === "customer"
+      ? customerRecipients
+      : recipientKind === "system"
+        ? [String(sender.from_email).trim().toLowerCase()].filter(validEmail)
+        : supplierRecipients;
+  if (!recipients.length)
+    return json(
+      { error: "Für den gewählten Workflow-Empfänger ist keine gültige E-Mail-Adresse hinterlegt." },
+      { status: 400 },
     );
 
   const article = [
@@ -1511,7 +1589,7 @@ async function sendCollectiveRequestEmails(
     );
   const employee = await db
     .prepare(
-      "SELECT e.name, c.name AS customer_name, c.markup_percent FROM customer_employees e JOIN customers c ON c.id = e.customer_id WHERE e.id = ? AND e.customer_id = ? AND e.active = 1",
+      "SELECT e.name, e.email AS employee_email, e.mail_to_main, c.name AS customer_name, c.email AS customer_email, c.markup_percent FROM customer_employees e JOIN customers c ON c.id = e.customer_id WHERE e.id = ? AND e.customer_id = ? AND e.active = 1",
     )
     .bind(employeeId, customerId)
     .first<Record<string, string | number | null>>();
@@ -1572,18 +1650,13 @@ async function sendCollectiveRequestEmails(
     recipientRows = suppliers.results;
     targetLabel = `Lieferantengruppe · ${String(firstArticle.group_name || "")}`;
   }
-  const recipients = Array.from(
+  const supplierRecipients = Array.from(
     new Set(
       recipientRows
         .map((row) => String(row.email || "").trim().toLowerCase())
         .filter(validEmail),
     ),
   );
-  if (!recipients.length)
-    return json(
-      { error: "Beim Lieferanten ist keine gültige E-Mail-Adresse vorhanden." },
-      { status: 400 },
-    );
   const sender = await db
     .prepare(
       "SELECT * FROM email_sender_profiles WHERE active = 1 ORDER BY is_default DESC, id LIMIT 1",
@@ -1599,11 +1672,33 @@ async function sendCollectiveRequestEmails(
     );
   const workflow = await db
     .prepare(
-      "SELECT request_template, supplier_offer_subject, attach_request_document, attach_request_gzd FROM workflow_settings ORDER BY id LIMIT 1",
+      "SELECT request_template, request_recipient, supplier_offer_subject, attach_request_document, attach_request_gzd FROM workflow_settings ORDER BY id LIMIT 1",
     )
     .first<Record<string, string | number | null>>();
   if (!workflow)
     return json({ error: "Die Anfragevorlage fehlt." }, { status: 500 });
+  const customerRecipients = Array.from(
+    new Set(
+      [
+        String(employee.employee_email || "").trim().toLowerCase(),
+        Number(employee.mail_to_main)
+          ? String(employee.customer_email || "").trim().toLowerCase()
+          : "",
+      ].filter(validEmail),
+    ),
+  );
+  const recipientKind = String(workflow.request_recipient || "supplier");
+  const recipients =
+    recipientKind === "customer"
+      ? customerRecipients
+      : recipientKind === "system"
+        ? [String(sender.from_email).trim().toLowerCase()].filter(validEmail)
+        : supplierRecipients;
+  if (!recipients.length)
+    return json(
+      { error: "Für den gewählten Workflow-Empfänger ist keine gültige E-Mail-Adresse hinterlegt." },
+      { status: 400 },
+    );
   const rowsById = new Map(
     articleRows.results.map((row) => [Number(row.id), row]),
   );
@@ -1802,7 +1897,7 @@ async function sendCollectiveOfferEmails(
     );
   const requestRow = await db
     .prepare(
-      "SELECT d.id, d.project_id, d.payload, c.name AS customer_name, c.customer_number, c.email AS customer_email, c.markup_percent, e.name AS employee_name, e.email AS employee_email, e.mail_to_main FROM documents d JOIN customers c ON c.id = d.customer_id JOIN customer_employees e ON e.id = d.customer_employee_id AND e.customer_id = c.id AND e.active = 1 WHERE d.id = ? AND d.type = 'Anfrage' AND d.status = 'Versendet' AND d.supplier_token = ? LIMIT 1",
+      "SELECT d.id, d.project_id, d.payload, d.supplier_id, c.name AS customer_name, c.customer_number, c.email AS customer_email, c.markup_percent, e.name AS employee_name, e.email AS employee_email, e.mail_to_main, s.email AS supplier_email FROM documents d JOIN customers c ON c.id = d.customer_id JOIN customer_employees e ON e.id = d.customer_employee_id AND e.customer_id = c.id AND e.active = 1 LEFT JOIN suppliers s ON s.id = d.supplier_id WHERE d.id = ? AND d.type = 'Anfrage' AND d.status = 'Versendet' AND d.supplier_token = ? LIMIT 1",
     )
     .bind(requestId, supplierToken)
     .first<Record<string, string | number | null>>();
@@ -1846,7 +1941,7 @@ async function sendCollectiveOfferEmails(
       },
       { status: 400 },
     );
-  const recipients = Array.from(
+  const customerRecipients = Array.from(
     new Set(
       [
         String(requestRow.employee_email || "").trim().toLowerCase(),
@@ -1856,11 +1951,6 @@ async function sendCollectiveOfferEmails(
       ].filter(validEmail),
     ),
   );
-  if (!recipients.length)
-    return json(
-      { error: "Beim Kunden ist keine gültige E-Mail-Adresse vorhanden." },
-      { status: 400 },
-    );
   const sender = await db
     .prepare(
       "SELECT * FROM email_sender_profiles WHERE active = 1 ORDER BY is_default DESC, id LIMIT 1",
@@ -1873,11 +1963,25 @@ async function sendCollectiveOfferEmails(
     );
   const workflow = await db
     .prepare(
-      "SELECT offer_template, attach_offer_document, attach_offer_gzd FROM workflow_settings ORDER BY id LIMIT 1",
+      "SELECT offer_template, offer_recipient, attach_offer_document, attach_offer_gzd FROM workflow_settings ORDER BY id LIMIT 1",
     )
     .first<Record<string, string | number | null>>();
   if (!workflow)
     return json({ error: "Die Angebotsvorlage fehlt." }, { status: 500 });
+  const recipientKind = String(workflow.offer_recipient || "customer");
+  const recipients =
+    recipientKind === "supplier"
+      ? [String(requestRow.supplier_email || "").trim().toLowerCase()].filter(
+          validEmail,
+        )
+      : recipientKind === "system"
+        ? [String(sender.from_email).trim().toLowerCase()].filter(validEmail)
+        : customerRecipients;
+  if (!recipients.length)
+    return json(
+      { error: "Für den gewählten Workflow-Empfänger ist keine gültige E-Mail-Adresse hinterlegt." },
+      { status: 400 },
+    );
   const markupPercent = Number(requestRow.markup_percent || 0);
   const offerItems: StateDocumentItem[] = requestPayload.items.map(
     (requestItem) => {
@@ -2072,7 +2176,7 @@ async function sendOfferEmails(
 
   const requestRow = await db
     .prepare(
-      "SELECT d.id, d.document_number, d.customer_id, d.customer_employee_id, d.project_id, d.supplier_id, d.requested_quantities_json, d.payload, c.name AS customer_name, c.customer_number, c.email AS customer_email, c.markup_percent, e.name AS employee_name, e.email AS employee_email, e.mail_to_main, a.id AS article_id, a.sku, a.designation_1, a.designation_2, s.name AS supplier_name FROM documents d JOIN customers c ON c.id = d.customer_id JOIN customer_employees e ON e.id = d.customer_employee_id AND e.customer_id = c.id AND e.active = 1 LEFT JOIN document_lines dl ON dl.document_id = d.id LEFT JOIN articles a ON a.id = dl.article_id LEFT JOIN suppliers s ON s.id = d.supplier_id WHERE d.id = ? AND d.type = 'Anfrage' AND d.status = 'Versendet' AND d.supplier_token = ? LIMIT 1",
+      "SELECT d.id, d.document_number, d.customer_id, d.customer_employee_id, d.project_id, d.supplier_id, d.requested_quantities_json, d.payload, c.name AS customer_name, c.customer_number, c.email AS customer_email, c.markup_percent, e.name AS employee_name, e.email AS employee_email, e.mail_to_main, a.id AS article_id, a.sku, a.designation_1, a.designation_2, s.name AS supplier_name, s.email AS supplier_email FROM documents d JOIN customers c ON c.id = d.customer_id JOIN customer_employees e ON e.id = d.customer_employee_id AND e.customer_id = c.id AND e.active = 1 LEFT JOIN document_lines dl ON dl.document_id = d.id LEFT JOIN articles a ON a.id = dl.article_id LEFT JOIN suppliers s ON s.id = d.supplier_id WHERE d.id = ? AND d.type = 'Anfrage' AND d.status = 'Versendet' AND d.supplier_token = ? LIMIT 1",
     )
     .bind(requestId, supplierToken)
     .first<Record<string, string | number | null>>();
@@ -2112,7 +2216,7 @@ async function sendOfferEmails(
       { status: 400 },
     );
 
-  const recipients = Array.from(
+  const customerRecipients = Array.from(
     new Set(
       [
         String(requestRow.employee_email || "").trim().toLowerCase(),
@@ -2122,11 +2226,6 @@ async function sendOfferEmails(
       ].filter(validEmail),
     ),
   );
-  if (!recipients.length)
-    return json(
-      { error: "Beim Kunden ist keine gültige E-Mail-Adresse vorhanden." },
-      { status: 400 },
-    );
   const sender = await db
     .prepare(
       "SELECT * FROM email_sender_profiles WHERE active = 1 ORDER BY is_default DESC, id LIMIT 1",
@@ -2142,13 +2241,27 @@ async function sendOfferEmails(
     );
   const workflow = await db
     .prepare(
-      "SELECT offer_template, attach_offer_document, attach_offer_gzd FROM workflow_settings ORDER BY id LIMIT 1",
+      "SELECT offer_template, offer_recipient, attach_offer_document, attach_offer_gzd FROM workflow_settings ORDER BY id LIMIT 1",
     )
     .first<Record<string, string | number | null>>();
   if (!workflow)
     return json(
       { error: "Die Angebotsvorlage wurde nicht gefunden." },
       { status: 500 },
+    );
+  const recipientKind = String(workflow.offer_recipient || "customer");
+  const recipients =
+    recipientKind === "supplier"
+      ? [String(requestRow.supplier_email || "").trim().toLowerCase()].filter(
+          validEmail,
+        )
+      : recipientKind === "system"
+        ? [String(sender.from_email).trim().toLowerCase()].filter(validEmail)
+        : customerRecipients;
+  if (!recipients.length)
+    return json(
+      { error: "Für den gewählten Workflow-Empfänger ist keine gültige E-Mail-Adresse hinterlegt." },
+      { status: 400 },
     );
 
   const article = [
@@ -2318,7 +2431,7 @@ async function sendOrderEmail(
     );
   const offerRow = await db
     .prepare(
-      "SELECT d.id, d.project_id, d.payload, c.name AS customer_name, e.name AS employee_name FROM documents d JOIN customers c ON c.id = d.customer_id LEFT JOIN customer_employees e ON e.id = d.customer_employee_id WHERE d.id = ? AND d.type = 'Angebot' AND d.status = 'Offen' LIMIT 1",
+      "SELECT d.id, d.project_id, d.payload, d.supplier_id, c.name AS customer_name, c.email AS customer_email, e.name AS employee_name, e.email AS employee_email, e.mail_to_main, s.email AS supplier_email FROM documents d JOIN customers c ON c.id = d.customer_id LEFT JOIN customer_employees e ON e.id = d.customer_employee_id LEFT JOIN suppliers s ON s.id = d.supplier_id WHERE d.id = ? AND d.type = 'Angebot' AND d.status = 'Offen' LIMIT 1",
     )
     .bind(offerId)
     .first<Record<string, string | number | null>>();
@@ -2333,7 +2446,7 @@ async function sendOrderEmail(
   );
   const workflow = await db
     .prepare(
-      "SELECT order_template FROM workflow_settings ORDER BY id LIMIT 1",
+      "SELECT order_template, order_recipient FROM workflow_settings ORDER BY id LIMIT 1",
     )
     .first<Record<string, string | number | null>>();
   const sender = await db
@@ -2346,14 +2459,32 @@ async function sendOrderEmail(
       { error: "Es ist kein aktiver SMTP-Absender eingerichtet." },
       { status: 400 },
     );
-  const backendRecipient = String(sender.from_email || "")
-    .trim()
-    .toLowerCase();
-  if (!validEmail(backendRecipient))
+  const customerRecipients = Array.from(
+    new Set(
+      [
+        String(offerRow.employee_email || "").trim().toLowerCase(),
+        Number(offerRow.mail_to_main)
+          ? String(offerRow.customer_email || "").trim().toLowerCase()
+          : "",
+      ].filter(validEmail),
+    ),
+  );
+  const recipientKind = String(workflow?.order_recipient || "system");
+  const recipients =
+    recipientKind === "customer"
+      ? customerRecipients
+      : recipientKind === "supplier"
+        ? [String(offerRow.supplier_email || "").trim().toLowerCase()].filter(
+            validEmail,
+          )
+        : [String(sender.from_email || "").trim().toLowerCase()].filter(
+            validEmail,
+          );
+  if (!recipients.length)
     return json(
       {
         error:
-          "Beim Standardabsender ist keine gültige E-Mail-Adresse hinterlegt.",
+          "Für den gewählten Workflow-Empfänger ist keine gültige E-Mail-Adresse hinterlegt.",
       },
       { status: 400 },
     );
@@ -2475,23 +2606,32 @@ async function sendOrderEmail(
     items: orderItems,
   });
   const messageBody = `${orderDocumentText}\n\nDie Bestellung wurde vom Kunden im Kundenportal ausgelöst.\nBestellnummer: ${orderNumber}\nProjekt: ${projectId}`;
-  await sendSmtpMessage(
-    sender,
-    await decryptEmailPassword(env, db, sender.password_ciphertext),
-    backendRecipient,
-    `Neue Kundenbestellung ${orderNumber} · ${String(offerRow.customer_name)}`,
-    messageBody,
-    [
-      {
-        filename: `${orderNumber}.pdf`,
-        contentType: "application/pdf",
-        contentBase64: pdfDataUri.slice(pdfDataUri.indexOf(",") + 1),
-      },
-    ],
+  const password = await decryptEmailPassword(
+    env,
+    db,
+    sender.password_ciphertext,
+  );
+  await Promise.all(
+    recipients.map((recipient) =>
+      sendSmtpMessage(
+        sender,
+        password,
+        recipient,
+        `Neue Kundenbestellung ${orderNumber} · ${String(offerRow.customer_name)}`,
+        messageBody,
+        [
+          {
+            filename: `${orderNumber}.pdf`,
+            contentType: "application/pdf",
+            contentBase64: pdfDataUri.slice(pdfDataUri.indexOf(",") + 1),
+          },
+        ],
+      ),
+    ),
   );
   return json({
     ok: true,
-    message: `Der Bestellungsbeleg wurde an den Standardabsender ${backendRecipient} gesendet.`,
+    message: `Der Bestellungsbeleg wurde an ${recipients.join(", ")} gesendet.`,
   });
 }
 
@@ -2689,6 +2829,23 @@ async function readFullState(db: D1Database) {
         offerTemplate: String(workflowRow.offer_template),
         orderTemplate: String(workflowRow.order_template),
         confirmationTemplate: String(workflowRow.confirmation_template),
+        reorderPointSubject: String(
+          workflowRow.reorder_point_subject ??
+            "Meldebestand erreicht: {sku} · {article}",
+        ),
+        reorderPointTemplate: String(
+          workflowRow.reorder_point_template ??
+            "Guten Tag {customer},\\n\\nder Meldebestand für den Artikel {sku} · {article} wurde erreicht.\\n\\nAktueller Bestand: {stock} Stück\\nMeldebestand: {minimum} Stück\\n\\nBitte prüfen Sie eine Nachbestellung.\\n\\nFreundliche Grüsse\\nPrintcenter",
+        ).replaceAll("\\n", "\n"),
+        requestRecipient: String(workflowRow.request_recipient ?? "supplier"),
+        offerRecipient: String(workflowRow.offer_recipient ?? "customer"),
+        orderRecipient: String(workflowRow.order_recipient ?? "system"),
+        confirmationRecipient: String(
+          workflowRow.confirmation_recipient ?? "customer",
+        ),
+        reorderPointRecipient: String(
+          workflowRow.reorder_point_recipient ?? "customer",
+        ),
         employeeLoginSubject: String(
           workflowRow.employee_login_subject ??
             "Ihr Zugang zum Printcenter von {company}",
@@ -2696,6 +2853,14 @@ async function readFullState(db: D1Database) {
         employeeLoginTemplate: String(
           workflowRow.employee_login_template ??
             "Guten Tag {salutation} {lastName},\\n\\nIhr persönlicher Zugang zum Kundenportal von {company} ist eingerichtet.\\n\\nPortal: {portalUrl}\\nLogin: {email}\\nPasswort: {password}\\n\\nBitte bewahren Sie diese Zugangsdaten sicher auf.\\n\\nFreundliche Grüsse\\nPrintcenter",
+        ).replaceAll("\\n", "\n"),
+        customerPasswordResetSubject: String(
+          workflowRow.customer_password_reset_subject ??
+            "Passwort für Ihr Printcenter-Kundenportal zurücksetzen",
+        ),
+        customerPasswordResetTemplate: String(
+          workflowRow.customer_password_reset_template ??
+            "Guten Tag {salutation} {lastName},\\n\\nüber den folgenden Link können Sie Ihr Passwort für das Kundenportal von {company} neu setzen:\\n\\n{resetUrl}\\n\\nDer Link ist {expiresIn} gültig und kann nur einmal verwendet werden. Falls Sie diese Änderung nicht angefordert haben, können Sie diese E-Mail ignorieren.\\n\\nFreundliche Grüsse\\nPrintcenter",
         ).replaceAll("\\n", "\n"),
         backendPasswordResetSubject: String(
           workflowRow.backend_password_reset_subject ??
@@ -3134,17 +3299,30 @@ async function replaceFullState(db: D1Database, state: FullState) {
   statements.push(
     db
       .prepare(
-        "INSERT INTO workflow_settings (id, request_template, offer_template, order_template, confirmation_template, employee_login_subject, employee_login_template, backend_password_reset_subject, backend_password_reset_template, supplier_offer_subject, offer_email, order_email, attach_request_document, attach_request_gzd, attach_offer_document, attach_offer_gzd, attach_order_document, attach_order_gzd, attach_confirmation_document, attach_confirmation_gzd, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        "INSERT INTO workflow_settings (id, request_template, offer_template, order_template, confirmation_template, reorder_point_subject, reorder_point_template, request_recipient, offer_recipient, order_recipient, confirmation_recipient, reorder_point_recipient, employee_login_subject, employee_login_template, customer_password_reset_subject, customer_password_reset_template, backend_password_reset_subject, backend_password_reset_template, supplier_offer_subject, offer_email, order_email, attach_request_document, attach_request_gzd, attach_offer_document, attach_offer_gzd, attach_order_document, attach_order_gzd, attach_confirmation_document, attach_confirmation_gzd, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
       )
       .bind(
         workflow.requestTemplate,
         workflow.offerTemplate,
         workflow.orderTemplate,
         workflow.confirmationTemplate,
+        workflow.reorderPointSubject ||
+          "Meldebestand erreicht: {sku} · {article}",
+        workflow.reorderPointTemplate ||
+          "Guten Tag {customer},\n\nder Meldebestand für den Artikel {sku} · {article} wurde erreicht.\n\nAktueller Bestand: {stock} Stück\nMeldebestand: {minimum} Stück\n\nBitte prüfen Sie eine Nachbestellung.\n\nFreundliche Grüsse\nPrintcenter",
+        workflow.requestRecipient || "supplier",
+        workflow.offerRecipient || "customer",
+        workflow.orderRecipient || "system",
+        workflow.confirmationRecipient || "customer",
+        workflow.reorderPointRecipient || "customer",
         workflow.employeeLoginSubject ||
           "Ihr Zugang zum Printcenter von {company}",
         workflow.employeeLoginTemplate ||
           "Guten Tag {salutation} {lastName},\n\nIhr persönlicher Zugang zum Kundenportal von {company} ist eingerichtet.\n\nPortal: {portalUrl}\nLogin: {email}\nPasswort: {password}\n\nBitte bewahren Sie diese Zugangsdaten sicher auf.\n\nFreundliche Grüsse\nPrintcenter",
+        workflow.customerPasswordResetSubject ||
+          "Passwort für Ihr Printcenter-Kundenportal zurücksetzen",
+        workflow.customerPasswordResetTemplate ||
+          "Guten Tag {salutation} {lastName},\n\nüber den folgenden Link können Sie Ihr Passwort für das Kundenportal von {company} neu setzen:\n\n{resetUrl}\n\nDer Link ist {expiresIn} gültig und kann nur einmal verwendet werden. Falls Sie diese Änderung nicht angefordert haben, können Sie diese E-Mail ignorieren.\n\nFreundliche Grüsse\nPrintcenter",
         workflow.backendPasswordResetSubject ||
           "Passwort für Printcenter zurücksetzen",
         workflow.backendPasswordResetTemplate ||
@@ -3256,7 +3434,55 @@ async function readIntegrationSettings(db: D1Database) {
     ftpPort: String(row?.ftp_port ?? "22"),
     ftpUsername: String(row?.ftp_username ?? ""),
     ftpDirectory: String(row?.ftp_directory ?? "/printcenter"),
+    sftpPullIntervalMinutes: Number(row?.sftp_pull_interval_minutes ?? 60),
+    sftpCsvEntity: String(row?.sftp_csv_entity ?? "articles"),
+    sftpCsvDelimiter: String(row?.sftp_csv_delimiter ?? ";"),
+    sftpCsvHasHeader: Boolean(row?.sftp_csv_has_header ?? 1),
+    sftpCsvFilePattern: String(row?.sftp_csv_file_pattern ?? "*.csv"),
+    sftpCsvMappings: parseJson<
+      Array<{ csvColumn: string; targetField: string }>
+    >(String(row?.sftp_csv_mapping_json ?? "[]"), []),
   };
+}
+
+async function purgeStoredFiles(bucket: R2Bucket) {
+  let cursor: string | undefined;
+  let deletedFiles = 0;
+  do {
+    const page = await bucket.list({ cursor });
+    const keys = page.objects.map((object) => object.key);
+    if (keys.length) {
+      await bucket.delete(keys);
+      deletedFiles += keys.length;
+    }
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+  return deletedFiles;
+}
+
+async function purgeBusinessData(db: D1Database) {
+  await ensureFullSchema(db);
+  await db.batch([
+    db.prepare("DELETE FROM document_attachments"),
+    db.prepare("DELETE FROM document_offer_options"),
+    db.prepare("DELETE FROM document_lines"),
+    db.prepare("DELETE FROM documents"),
+    db.prepare("DELETE FROM projects"),
+    db.prepare("DELETE FROM gzd_templates"),
+    db.prepare("DELETE FROM stock_events"),
+    db.prepare("DELETE FROM articles"),
+    db.prepare("DELETE FROM customer_accounts"),
+    db.prepare("DELETE FROM customer_employees"),
+    db.prepare("DELETE FROM suppliers"),
+    db.prepare("DELETE FROM supplier_groups"),
+    db.prepare("DELETE FROM customers"),
+    db.prepare("DELETE FROM navision_sync_log"),
+    db.prepare("DELETE FROM app_meta WHERE key LIKE 'portal_preview:%'"),
+    db.prepare(
+      "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('full_state_seeded', '1')",
+    ),
+  ]);
+  await db.prepare("PRAGMA optimize").run();
 }
 
 async function handleDirectoryApi(
@@ -3283,6 +3509,9 @@ async function handleDirectoryApi(
   const backendPasswordResetMatch = url.pathname.match(
     /^\/api\/backend-password-resets\/([0-9a-f-]{36})$/i,
   );
+  const customerPasswordResetMatch = url.pathname.match(
+    /^\/api\/customer-password-resets\/([0-9a-f-]{36})$/i,
+  );
   if (url.pathname === "/api/database/health" && request.method === "GET")
     return json(await databaseHealth(db));
   if (url.pathname === "/api/integrations" && request.method === "GET")
@@ -3303,10 +3532,285 @@ async function handleDirectoryApi(
     return json(await readDirectory(db));
   const body =
     request.method === "GET" ||
-    request.method === "DELETE" ||
+    (request.method === "DELETE" && url.pathname !== "/api/system-data") ||
     Boolean(portalPreviewMatch)
       ? {}
       : await request.json<Record<string, unknown>>();
+
+  if (url.pathname === "/api/system-data" && request.method === "DELETE") {
+    if (!sameOriginRequest(request, url, env))
+      return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
+    if (String(body.confirmation || "") !== "ALLE DATEN LÖSCHEN")
+      return json(
+        { error: "Die Sicherheitsbestätigung ist nicht korrekt." },
+        { status: 400 },
+      );
+    await purgeBusinessData(db);
+    let deletedFiles = 0;
+    let fileCleanupWarning: string | undefined;
+    try {
+      deletedFiles = await purgeStoredFiles(env.FILES);
+    } catch (error) {
+      fileCleanupWarning =
+        error instanceof Error
+          ? error.message
+          : "Gespeicherte Dateien konnten nicht vollständig entfernt werden.";
+    }
+    return json({ ok: true, deletedFiles, fileCleanupWarning });
+  }
+
+  if (url.pathname === "/api/stock-snapshots" && request.method === "POST") {
+    if (!sameOriginRequest(request, url, env))
+      return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
+    const snapshots = Array.isArray(body.snapshots)
+      ? body.snapshots.slice(0, 5000)
+      : [];
+    if (!snapshots.length)
+      return json(
+        { error: "Es wurden keine Bestandswerte übermittelt." },
+        { status: 400 },
+      );
+    const statements: D1PreparedStatement[] = [];
+    const missingSkus: string[] = [];
+    const reorderPointAlerts: Array<{
+      articleId: number;
+      sku: string;
+      previousStock: number;
+      stock: number;
+      minimum: number;
+      change: number;
+    }> = [];
+    let updated = 0;
+    let unchanged = 0;
+    for (const rawSnapshot of snapshots) {
+      const snapshot = rawSnapshot as Record<string, unknown>;
+      const sku = String(snapshot.sku || "").trim().slice(0, 120);
+      const stock = Number(snapshot.stock);
+      if (!sku || !Number.isFinite(stock) || !Number.isInteger(stock)) continue;
+      const article = await db
+        .prepare(
+          "SELECT id, stock, reorder_point FROM articles WHERE sku = ? LIMIT 1",
+        )
+        .bind(sku)
+        .first<{ id: number; stock: number; reorder_point: number }>();
+      if (!article) {
+        missingSkus.push(sku);
+        continue;
+      }
+      const previousStock = Number(article.stock);
+      if (previousStock === stock) {
+        unchanged += 1;
+        continue;
+      }
+      const occurredAtValue = String(snapshot.occurredAt || "").trim();
+      const occurredAt = Number.isFinite(Date.parse(occurredAtValue))
+        ? new Date(occurredAtValue).toISOString()
+        : new Date().toISOString();
+      const change = stock - previousStock;
+      statements.push(
+        db.prepare("UPDATE articles SET stock = ? WHERE id = ?").bind(
+          stock,
+          article.id,
+        ),
+        db
+          .prepare(
+            "INSERT INTO stock_events (article_id, occurred_at, change, stock_after, reason) VALUES (?, ?, ?, ?, ?)",
+          )
+          .bind(
+            article.id,
+            occurredAt,
+            change,
+            stock,
+            String(snapshot.reason || "Bestandsimport über SFTP").slice(0, 240),
+          ),
+      );
+      if (previousStock > article.reorder_point && stock <= article.reorder_point) {
+        reorderPointAlerts.push({
+          articleId: article.id,
+          sku,
+          previousStock,
+          stock,
+          minimum: article.reorder_point,
+          change,
+        });
+        statements.push(
+          db
+            .prepare(
+              "INSERT INTO navision_sync_log (entity_type, entity_id, direction, status, external_reference) VALUES ('reorder_point_alert', ?, 'outbound', 'pending', ?)",
+            )
+            .bind(article.id, sku),
+        );
+      }
+      updated += 1;
+    }
+    if (statements.length) await db.batch(statements);
+    return json({
+      ok: true,
+      updated,
+      unchanged,
+      missingSkus,
+      reorderPointAlerts,
+      notificationWorkflowReady: true,
+    });
+  }
+
+  if (
+    url.pathname === "/api/customer-password-resets" &&
+    request.method === "POST"
+  ) {
+    if (!sameOriginRequest(request, url, env))
+      return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
+    const customerId = Number(body.customerId);
+    const employeeId = Number(body.employeeId);
+    if (
+      !Number.isInteger(customerId) ||
+      customerId <= 0 ||
+      !Number.isInteger(employeeId) ||
+      employeeId <= 0
+    )
+      return json(
+        { error: "Der Mitarbeiterzugang ist ungültig." },
+        { status: 400 },
+      );
+    const employee = await db
+      .prepare(
+        "SELECT e.id, e.name, e.salutation, e.first_name, e.last_name, e.email, c.name AS company FROM customer_employees e JOIN customers c ON c.id = e.customer_id WHERE e.id = ? AND e.customer_id = ? AND e.active = 1 LIMIT 1",
+      )
+      .bind(employeeId, customerId)
+      .first<Record<string, string | number | null>>();
+    if (!employee)
+      return json(
+        { error: "Der aktive Mitarbeiterzugang wurde nicht gefunden." },
+        { status: 404 },
+      );
+    const sender = await db
+      .prepare(
+        "SELECT * FROM email_sender_profiles WHERE active = 1 ORDER BY is_default DESC, id LIMIT 1",
+      )
+      .first<EmailSenderRow>();
+    if (!sender?.password_ciphertext)
+      return json(
+        {
+          error:
+            "Bitte zuerst unter E-Mail-Einstellungen einen aktiven SMTP-Absender einrichten.",
+        },
+        { status: 400 },
+      );
+    const workflow = await db
+      .prepare(
+        "SELECT customer_password_reset_subject, customer_password_reset_template FROM workflow_settings ORDER BY id LIMIT 1",
+      )
+      .first<Record<string, string | null>>();
+    const token = crypto.randomUUID();
+    const expiresAt = Date.now() + 30 * 60_000;
+    const resetUrl = `${publicAppOrigin(env, url)}/passwort-zuruecksetzen/${token}`;
+    const salutation =
+      employee.salutation && employee.salutation !== "Divers"
+        ? String(employee.salutation)
+        : "";
+    const values = {
+      company: String(employee.company),
+      salutation,
+      firstName: String(employee.first_name ?? ""),
+      lastName: String(employee.last_name ?? ""),
+      employee: String(employee.name),
+      email: String(employee.email),
+      resetUrl,
+      expiresIn: "30 Minuten",
+    };
+    const subject = renderEmailTemplate(
+      String(
+        workflow?.customer_password_reset_subject ??
+          "Passwort für Ihr Printcenter-Kundenportal zurücksetzen",
+      ),
+      values,
+    ).replace(/[\r\n]+/g, " ");
+    const messageBody = renderEmailTemplate(
+      String(
+        workflow?.customer_password_reset_template ??
+          "Guten Tag {salutation} {lastName},\\n\\nüber den folgenden Link können Sie Ihr Passwort für das Kundenportal von {company} neu setzen:\\n\\n{resetUrl}\\n\\nDer Link ist {expiresIn} gültig und kann nur einmal verwendet werden. Falls Sie diese Änderung nicht angefordert haben, können Sie diese E-Mail ignorieren.\\n\\nFreundliche Grüsse\\nPrintcenter",
+      ).replaceAll("\\n", "\n"),
+      values,
+    );
+    await db
+      .prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)")
+      .bind(
+        `customer_password_reset:${token}`,
+        JSON.stringify({ customerId, employeeId, expiresAt }),
+      )
+      .run();
+    try {
+      await sendSmtpMessage(
+        sender,
+        await decryptEmailPassword(env, db, sender.password_ciphertext),
+        String(employee.email),
+        subject,
+        messageBody,
+      );
+      return json({ ok: true });
+    } catch (error) {
+      await db
+        .prepare("DELETE FROM app_meta WHERE key = ?")
+        .bind(`customer_password_reset:${token}`)
+        .run();
+      return json(
+        {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Der Reset-Link konnte nicht versendet werden.",
+        },
+        { status: 400 },
+      );
+    }
+  }
+
+  if (customerPasswordResetMatch && request.method === "POST") {
+    if (!sameOriginRequest(request, url, env))
+      return json({ error: "Diese Anfrage ist nicht erlaubt." }, { status: 403 });
+    const password = String(body.password || "");
+    if (password.length < 8)
+      return json(
+        { error: "Das Passwort muss mindestens 8 Zeichen haben." },
+        { status: 400 },
+      );
+    const token = customerPasswordResetMatch[1].toLowerCase();
+    const key = `customer_password_reset:${token}`;
+    const stored = await db
+      .prepare("SELECT value FROM app_meta WHERE key = ? LIMIT 1")
+      .bind(key)
+      .first<{ value: string }>();
+    if (!stored?.value)
+      return json(
+        { error: "Dieser Reset-Link ist ungültig oder wurde bereits verwendet." },
+        { status: 404 },
+      );
+    const reset = parseJson<{
+      customerId: number;
+      employeeId: number;
+      expiresAt: number;
+    }>(stored.value, { customerId: 0, employeeId: 0, expiresAt: 0 });
+    if (reset.expiresAt < Date.now()) {
+      await db.prepare("DELETE FROM app_meta WHERE key = ?").bind(key).run();
+      return json(
+        { error: "Dieser Reset-Link ist abgelaufen. Bitte fordern Sie einen neuen an." },
+        { status: 410 },
+      );
+    }
+    const result = await db
+      .prepare(
+        "UPDATE customer_employees SET password_hash = ? WHERE id = ? AND customer_id = ? AND active = 1",
+      )
+      .bind(password, reset.employeeId, reset.customerId)
+      .run();
+    if (!result.meta.changes)
+      return json(
+        { error: "Der Mitarbeiterzugang wurde nicht gefunden." },
+        { status: 404 },
+      );
+    await db.prepare("DELETE FROM app_meta WHERE key = ?").bind(key).run();
+    return json({ ok: true });
+  }
 
   if (
     url.pathname === "/api/backend-password-resets" &&
@@ -3775,9 +4279,36 @@ async function handleDirectoryApi(
     await ensureFullSchema(db);
     const protocol =
       String(body.ftpProtocol || "SFTP") === "FTP" ? "FTP" : "SFTP";
+    const allowedIntervals = new Set([0, 15, 30, 60, 180, 360, 720, 1440]);
+    const requestedInterval = Number(body.sftpPullIntervalMinutes ?? 60);
+    const pullInterval = allowedIntervals.has(requestedInterval)
+      ? requestedInterval
+      : 60;
+    const entity = ["customers", "suppliers", "articles"].includes(
+      String(body.sftpCsvEntity),
+    )
+      ? String(body.sftpCsvEntity)
+      : "articles";
+    const delimiter = [";", ",", "tab"].includes(
+      String(body.sftpCsvDelimiter),
+    )
+      ? String(body.sftpCsvDelimiter)
+      : ";";
+    const mappings = Array.isArray(body.sftpCsvMappings)
+      ? body.sftpCsvMappings
+          .slice(0, 100)
+          .map((mapping) => {
+            const item = mapping as Record<string, unknown>;
+            return {
+              csvColumn: String(item.csvColumn || "").trim().slice(0, 120),
+              targetField: String(item.targetField || "").trim().slice(0, 120),
+            };
+          })
+          .filter((mapping) => mapping.csvColumn || mapping.targetField)
+      : [];
     await db
       .prepare(
-        "INSERT INTO integration_settings (id, navision_endpoint, navision_tenant, api_base_url, api_client_id, ftp_protocol, ftp_host, ftp_port, ftp_username, ftp_directory, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET navision_endpoint = excluded.navision_endpoint, navision_tenant = excluded.navision_tenant, api_base_url = excluded.api_base_url, api_client_id = excluded.api_client_id, ftp_protocol = excluded.ftp_protocol, ftp_host = excluded.ftp_host, ftp_port = excluded.ftp_port, ftp_username = excluded.ftp_username, ftp_directory = excluded.ftp_directory, updated_at = CURRENT_TIMESTAMP",
+        "INSERT INTO integration_settings (id, navision_endpoint, navision_tenant, api_base_url, api_client_id, ftp_protocol, ftp_host, ftp_port, ftp_username, ftp_directory, sftp_pull_interval_minutes, sftp_csv_entity, sftp_csv_delimiter, sftp_csv_has_header, sftp_csv_file_pattern, sftp_csv_mapping_json, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET navision_endpoint = excluded.navision_endpoint, navision_tenant = excluded.navision_tenant, api_base_url = excluded.api_base_url, api_client_id = excluded.api_client_id, ftp_protocol = excluded.ftp_protocol, ftp_host = excluded.ftp_host, ftp_port = excluded.ftp_port, ftp_username = excluded.ftp_username, ftp_directory = excluded.ftp_directory, sftp_pull_interval_minutes = excluded.sftp_pull_interval_minutes, sftp_csv_entity = excluded.sftp_csv_entity, sftp_csv_delimiter = excluded.sftp_csv_delimiter, sftp_csv_has_header = excluded.sftp_csv_has_header, sftp_csv_file_pattern = excluded.sftp_csv_file_pattern, sftp_csv_mapping_json = excluded.sftp_csv_mapping_json, updated_at = CURRENT_TIMESTAMP",
       )
       .bind(
         body.navisionEndpoint || "",
@@ -3789,6 +4320,13 @@ async function handleDirectoryApi(
         body.ftpPort || (protocol === "SFTP" ? "22" : "21"),
         body.ftpUsername || "",
         body.ftpDirectory || "/printcenter",
+        pullInterval,
+        entity,
+        delimiter,
+        body.sftpCsvHasHeader === false ? 0 : 1,
+        String(body.sftpCsvFilePattern || "*.csv").trim().slice(0, 160) ||
+          "*.csv",
+        JSON.stringify(mappings),
       )
       .run();
     return json(await readIntegrationSettings(db));

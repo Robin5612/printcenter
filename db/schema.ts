@@ -385,6 +385,23 @@ export const workflowSettings = sqliteTable("workflow_settings", {
   offerTemplate: text("offer_template").notNull(),
   orderTemplate: text("order_template").notNull(),
   confirmationTemplate: text("confirmation_template").notNull(),
+  reorderPointSubject: text("reorder_point_subject")
+    .notNull()
+    .default("Meldebestand erreicht: {sku} · {article}"),
+  reorderPointTemplate: text("reorder_point_template")
+    .notNull()
+    .default(
+      "Guten Tag {customer},\n\nder Meldebestand für den Artikel {sku} · {article} wurde erreicht.\n\nAktueller Bestand: {stock} Stück\nMeldebestand: {minimum} Stück\n\nBitte prüfen Sie eine Nachbestellung.\n\nFreundliche Grüsse\nPrintcenter",
+    ),
+  requestRecipient: text("request_recipient").notNull().default("supplier"),
+  offerRecipient: text("offer_recipient").notNull().default("customer"),
+  orderRecipient: text("order_recipient").notNull().default("system"),
+  confirmationRecipient: text("confirmation_recipient")
+    .notNull()
+    .default("customer"),
+  reorderPointRecipient: text("reorder_point_recipient")
+    .notNull()
+    .default("customer"),
   employeeLoginSubject: text("employee_login_subject")
     .notNull()
     .default("Ihr Zugang zum Printcenter von {company}"),
@@ -392,6 +409,14 @@ export const workflowSettings = sqliteTable("workflow_settings", {
     .notNull()
     .default(
       "Guten Tag {salutation} {lastName},\n\nIhr persönlicher Zugang zum Kundenportal von {company} ist eingerichtet.\n\nPortal: {portalUrl}\nLogin: {email}\nPasswort: {password}\n\nBitte bewahren Sie diese Zugangsdaten sicher auf.\n\nFreundliche Grüsse\nPrintcenter",
+    ),
+  customerPasswordResetSubject: text("customer_password_reset_subject")
+    .notNull()
+    .default("Passwort für Ihr Printcenter-Kundenportal zurücksetzen"),
+  customerPasswordResetTemplate: text("customer_password_reset_template")
+    .notNull()
+    .default(
+      "Guten Tag {salutation} {lastName},\n\nüber den folgenden Link können Sie Ihr Passwort für das Kundenportal von {company} neu setzen:\n\n{resetUrl}\n\nDer Link ist {expiresIn} gültig und kann nur einmal verwendet werden. Falls Sie diese Änderung nicht angefordert haben, können Sie diese E-Mail ignorieren.\n\nFreundliche Grüsse\nPrintcenter",
     ),
   backendPasswordResetSubject: text("backend_password_reset_subject")
     .notNull()
@@ -446,6 +471,20 @@ export const integrationSettings = sqliteTable("integration_settings", {
   ftpPort: text("ftp_port").notNull().default("22"),
   ftpUsername: text("ftp_username").notNull().default(""),
   ftpDirectory: text("ftp_directory").notNull().default("/printcenter"),
+  sftpPullIntervalMinutes: integer("sftp_pull_interval_minutes")
+    .notNull()
+    .default(60),
+  sftpCsvEntity: text("sftp_csv_entity").notNull().default("articles"),
+  sftpCsvDelimiter: text("sftp_csv_delimiter").notNull().default(";"),
+  sftpCsvHasHeader: integer("sftp_csv_has_header", { mode: "boolean" })
+    .notNull()
+    .default(true),
+  sftpCsvFilePattern: text("sftp_csv_file_pattern")
+    .notNull()
+    .default("*.csv"),
+  sftpCsvMappingJson: text("sftp_csv_mapping_json")
+    .notNull()
+    .default("[]"),
   updatedAt: text("updated_at")
     .notNull()
     .default(sql`CURRENT_TIMESTAMP`),
